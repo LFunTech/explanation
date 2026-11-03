@@ -102,10 +102,13 @@ class Exam:
             row_factory=dict_row) as db:
             yield db
 
-    def search(self,subject='数学',grade='九年级',query='',limit=12,knowledge_ids=None,exclude_id=None):
+    def search(self,subject='数学',grade='九年级',query='',limit=12,knowledge_ids=None,exclude_id=None,
+               *,randomize=False,exclude_ids=None,region='上海'):
         code=next((k for k,v in SUBJECTS.items() if v==subject),'')
-        phase=phase_for(grade)
+        phase=phase_for(grade,region)
         ids=[v.removeprefix('exam:public:') for v in (knowledge_ids or [])]
+        excluded=[v.removeprefix('exam:public:') for v in (exclude_ids or [])]
+        order='random()' if randomize else 'q.updated_at DESC,q.id'
         with self.connect() as db:
             # 精确年级来自题目标签；无标签只返回同学段，并在 UI 明示待核对。
             rows=db.execute('''SELECT q.id::text,q.stem,q.answer,q.analysis,q.question_type,q.difficulty,
@@ -122,10 +125,11 @@ class Exam:
                         JOIN public.knowledge_point k ON k.id=r.knowledge_point_id WHERE r.question_id=q.id AND k.knowledge_point_name ILIKE %s))
                     AND (%s::text[]='{}' OR EXISTS(SELECT 1 FROM public.question_taxonomy_relation r WHERE r.question_id=q.id AND r.knowledge_point_id::text=ANY(%s)))
                     AND (%s::text IS NULL OR q.id::text<>%s)
+                    AND NOT(q.id::text=ANY(%s::text[]))
                     AND EXISTS(SELECT 1 FROM public.question_taxonomy_relation r JOIN public.knowledge_point k ON k.id=r.knowledge_point_id
                         WHERE r.question_id=q.id AND k.phase=%s AND k.effective_enabled)
-                ORDER BY q.updated_at DESC,q.id LIMIT %s''',
-                (code,query,'%'+query+'%','%'+query+'%',ids,ids,exclude_id,exclude_id,phase,limit*3)).fetchall()
+                ORDER BY '''+order+''' LIMIT %s''',
+                (code,query,'%'+query+'%','%'+query+'%',ids,ids,exclude_id,exclude_id,excluded,phase,limit*3)).fetchall()
         result=[]
         for row in rows:
             parsed=parse_stem(row['stem'])
@@ -137,7 +141,7 @@ class Exam:
             # 上海五四与源六三年级不做隐式等价映射。
             try:
                 question=Question(question_id='exam:public:'+row['id'],stem=row['stem'],subject=subject,
-                grade=grade,knowledge_points=list(dict.fromkeys(row['labels']))[:20],
+                grade=grade,region=region,knowledge_points=list(dict.fromkeys(row['labels']))[:20],
                 options=parsed['options'],sub_questions=parsed['sub_questions'],
                 knowledge_point_ids=list(dict.fromkeys(row['knowledge_ids']))[:20],
                 question_type={'SINGLE_CHOICE':'单选题','MULTIPLE_CHOICE':'多选题','FILL_BLANK':'填空题','SHORT_ANSWER':'解答题'}.get(row['question_type'],'解答题'),
@@ -152,6 +156,15 @@ class Exam:
             if len(result)>=limit:
                 break
         return result
+
+    def random_questions(self,subject='数学',grade='九年级',region='上海',limit=3,exclude_ids=None):
+        rows=self.search(subject,grade,limit=limit,randomize=True,exclude_ids=exclude_ids,region=region)
+        # 小题库不足一批时允许补回旧题，但同一批不重复。
+        if len(rows)<limit and exclude_ids:
+            extra=self.search(subject,grade,limit=limit-len(rows),randomize=True,
+                exclude_ids=[row['id'] for row in rows],region=region)
+            rows.extend(extra)
+        return rows
 
     def variants(self,question,limit):
         if not limit or not (question.knowledge_point_ids or question.knowledge_points):

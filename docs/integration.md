@@ -2,6 +2,8 @@
 
 服务以一题一包为生成和复用单位。每次请求接受 1—50 道题，直接传入题目内容，避免生成过程中题库变动导致读到另一版本。页面也可先调用 `GET /api/exam/questions` 选题。
 
+随机选题使用 `GET /api/exam/questions/random`：支持 `subject`、`grade`、`region`、`limit`（默认 3，最多 6）和 `exclude`（逗号分隔的上一批题目 ID）。在当前学科和对应学段的 ACTIVE 题目中随机抽取；候选不足时允许补回上一批题目，同批 ID 不重复。未标注具体年级时继续返回范围说明，不将学段匹配冒充年级匹配。
+
 ## 请求
 
 `POST /api/jobs` 返回 HTTP 202。可携带 `Idempotency-Key`（最大 200 字符）；同键同内容返回同一任务，同键不同内容返回 409。请求 JSON 格式见 README 和 `/docs`。

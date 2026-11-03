@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -224,6 +224,20 @@ def create_app(settings=None):
         if len(query)>200:
             raise HTTPException(422,'搜索词过长')
         return await asyncio.to_thread(Exam(cfg).search,subject,grade,query)
+
+    @app.get('/api/exam/questions/random')
+    async def random_questions(subject:str=Query(default='数学',max_length=30),
+            grade:str=Query(default='九年级',max_length=30),region:str=Query(default='上海',max_length=40),
+            limit:int=Query(default=3,ge=1,le=6),exclude:str=Query(default='',max_length=2000)):
+        excluded=[value.strip() for value in exclude.split(',') if value.strip()]
+        if len(excluded)>30:
+            raise HTTPException(422,'最多排除 30 道题')
+        try:
+            return await asyncio.to_thread(Exam(cfg).random_questions,subject,grade,region,limit,excluded)
+        except GenerationError:
+            raise
+        except Exception:
+            raise HTTPException(503,'暂时无法读取题库，请稍后点击“换一批”重试。') from None
 
     @app.get('/api/kb/stats')
     async def kb_stats():
