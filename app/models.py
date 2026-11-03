@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .diagrams import Diagram
+from .scope import TeachingScope
 
 
 class StrictModel(BaseModel):
@@ -16,7 +17,7 @@ class SubQuestion(StrictModel):
     analysis: str = Field(default='', max_length=20000)
 
 
-class Question(StrictModel):
+class Question(StrictModel,TeachingScope):
     question_id: str = Field(min_length=1, max_length=100)
     stem: str = Field(min_length=1, max_length=20000)
     subject: Literal['数学', '物理', '化学', '生物', '科学', '语文', '英语', '历史', '地理', '道德与法治'] = '数学'
@@ -169,7 +170,7 @@ class Review(StrictModel):
         return [f'{name}: {error}' for name, check in self.checks.model_dump().items() for error in check['errors']]
 
 
-class Resource(StrictModel):
+class Resource(StrictModel,TeachingScope):
     id: str = Field(min_length=1, max_length=100, pattern=r'^[A-Za-z0-9_.:-]+$')
     title: str = Field(min_length=1, max_length=150)
     kind: Literal['knowledge', 'curriculum', 'question'] = 'knowledge'

@@ -24,6 +24,7 @@ from .models import JobRequest, ResourceImport
 from .providers import GenerationError
 from .samples import SAMPLES, seed_resources
 from .store import Conflict, Store, digest
+from .scope import TeachingScope, validate_document_metadata
 
 
 def create_app(settings=None):
@@ -237,10 +238,12 @@ def create_app(settings=None):
         return await asyncio.to_thread(kb.graph,subject,query[:200])
 
     @app.get('/api/kb/search')
-    async def search_kb(query:str,subject:str='数学',grade:str='九年级',region:str='上海'):
+    async def search_kb(query:str,subject:str='数学',grade:str='九年级',region:str='上海',
+            curriculum_version:str='',school_system:str='',publisher:str='',textbook_version:str='',volume:str=''):
         if not query.strip() or len(query)>2000:
             raise HTTPException(422,'搜索词须为 1—2000 字符')
-        return await kb.search(query,subject,grade,region,include_graph=True)
+        scope=TeachingScope(curriculum_version=curriculum_version,school_system=school_system,publisher=publisher,textbook_version=textbook_version,volume=volume)
+        return await kb.search(query,subject,grade,region,include_graph=True,scope=scope.model_dump())
 
     async def run_kb_task(action):
         kb_state.update(status='running',processed=0,error=None)
@@ -268,13 +271,7 @@ def create_app(settings=None):
     @app.post('/api/kb/documents/import')
     async def import_document(file:UploadFile=File(...),metadata:str=Form(...)):
         try:
-            meta=json.loads(metadata)
-            if not isinstance(meta,dict) or not all(isinstance(meta.get(k),str) and meta[k].strip() for k in ['title','subject','source','version']):
-                raise ValueError('元数据须包含 title、subject、source、version')
-            if meta.get('source_type') not in {'curriculum','textbook','reference'}:
-                raise ValueError('source_type 须为 curriculum、textbook 或 reference')
-            if not isinstance(meta.get('grades',[]),list) or not all(isinstance(x,str) for x in meta.get('grades',[])):
-                raise ValueError('grades 须为年级字符串数组')
+            meta=validate_document_metadata(json.loads(metadata))
             raw=await file.read(25*1024*1024+1)
             if len(raw)>25*1024*1024:
                 raise ValueError('文档不能超过 25 MB')

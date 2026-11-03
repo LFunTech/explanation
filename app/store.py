@@ -60,6 +60,10 @@ class Store:
                     id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
                     manifest_json TEXT NOT NULL, created_at TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS package_fingerprint ON packages(fingerprint, created_at DESC);
+                CREATE TABLE IF NOT EXISTS item_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT NOT NULL REFERENCES items(id),
+                    message TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS item_events_item ON item_events(item_id,id DESC);
                 CREATE TABLE IF NOT EXISTS resources (
                     id TEXT PRIMARY KEY, body TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS callbacks (
@@ -116,6 +120,7 @@ class Store:
             item['error'] = json.loads(item.pop('error_json') or 'null')
             item.pop('context_json')
             item['reused'] = bool(item['reused'])
+            item['events'] = [dict(e) for e in db.execute('SELECT message,created_at FROM item_events WHERE item_id=? ORDER BY id DESC LIMIT 12',(item['id'],))][::-1]
             job['items'].append(item)
         job['status'] = aggregate(job['items'])
         job['progress'] = round(sum(i['progress'] for i in job['items']) / len(job['items']))
@@ -143,7 +148,10 @@ class Store:
 
     def progress(self, item_id, stage, value):
         with self.connect() as db:
-            db.execute('UPDATE items SET stage=?,progress=?,updated_at=? WHERE id=?', (stage, value, now(), item_id))
+            stamp=now()
+            db.execute('UPDATE items SET stage=?,progress=?,updated_at=? WHERE id=?', (stage[:180], value, stamp, item_id))
+            db.execute('INSERT INTO item_events(item_id,message,created_at) VALUES(?,?,?)',(item_id,stage[:2000],stamp))
+            db.execute('DELETE FROM item_events WHERE item_id=? AND id NOT IN (SELECT id FROM item_events WHERE item_id=? ORDER BY id DESC LIMIT 100)',(item_id,item_id))
 
     def context(self, item_id, value):
         with self.connect() as db:
@@ -152,6 +160,8 @@ class Store:
     def finish(self, item_id, *, package_id=None, error=None, reused=False):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            db.execute('INSERT INTO item_events(item_id,message,created_at) VALUES(?,?,?)',
+                       (item_id,(error['code']+'：'+error['message'])[:2000] if error else '已完成',now()))
             db.execute('UPDATE items SET status=?,stage=?,progress=?,package_id=?,error_json=?,reused=?,updated_at=? WHERE id=?',
                        ('failed' if error else 'completed', '生成失败' if error else '已完成', 0 if error else 100,
                         package_id, dump(error) if error else None, int(reused), now(), item_id))

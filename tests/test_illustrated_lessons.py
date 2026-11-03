@@ -105,7 +105,7 @@ async def test_actual_audio_budget_rewrites_and_never_reuses_stale_audio(tmp_pat
     class FakeQwen:
         calls=0
         speech_calls=0
-        async def lesson(self,question,resources,options,progress,feedback=None):
+        async def lesson(self,question,resources,options,progress,feedback=None,checkpoint=None):
             self.calls+=1
             result=lesson()
             result['solution_steps']+=[dict(title='确定端点',display='−1 处画实心点。',notes='代入边界满足原式。',narration='边界负一满足原式，所以用实心点。'),

@@ -15,7 +15,10 @@ from pptx.util import Inches, Pt
 
 from .config import ROOT
 from .diagrams import render_diagram
+from .question_layout import question_layout
 from .store import dump
+
+PRESENTATION_VERSION = 'ppt-canvas-v1'
 
 
 def paginate(text, capacity=330):
@@ -97,9 +100,9 @@ def inline_math_assets():
 def html_package(manifest, slides):
     css, katex, auto = inline_math_assets()
     template = (ROOT/'web/player.html').read_text(encoding='utf-8')
-    player_css = (ROOT/'web/player.css').read_text(encoding='utf-8')
+    player_css = (ROOT/'web/player.css').read_text(encoding='utf-8')+'\n'+(ROOT/'web/presentation.css').read_text(encoding='utf-8')
     player_js = (ROOT/'web/player.js').read_text(encoding='utf-8')
-    value = dump(dict(manifest=manifest, slides=slides)).replace('<', '\\u003c').replace('\u2028', '\\u2028').replace('\u2029', '\\u2029')
+    value = dump(dict(manifest=manifest, slides=slides,questionLayout=question_layout(manifest.get('question',{})))).replace('<', '\\u003c').replace('\u2028', '\\u2028').replace('\u2029', '\\u2029')
     replacements={'MATH_CSS':css,'PLAYER_CSS':player_css,'MATH_JS':katex,'MATH_AUTO':auto,
                   'LESSON_DATA':'window.COURSEWARE='+value+';','PLAYER_JS':player_js}
     # 一次替换模板，题目正文中的占位符不会被当成代码再次展开。
@@ -171,10 +174,25 @@ def export_pptx(path, slides, manifest):
         original=page.get('original')
         if original:
             question=manifest['question']
-            display=question['stem']+'\n'+'\n'.join(question['options'])+'\n'+'\n'.join('（'+q['id']+'）'+q['stem'] for q in question['sub_questions'])
+            layout=question_layout(question)
+            display=layout['stem']+'\n'+'\n'.join(layout['options'])+'\n'+'\n'.join('（'+q['id']+'）'+q['stem'] for q in layout['sub_questions'])
         else:
             display=page['display']
-        if page.get('flow'):
+        if original and layout['image_choices']:
+            box=slide.shapes.add_textbox(Inches(.75),Inches(1.95),Inches(11.8),Inches(1.0))
+            box.text_frame.word_wrap=True
+            add_rich_text(box.text_frame.paragraphs[0],display.strip(),24,'243E36')
+            from PIL import Image
+            choices=layout['image_choices'];cols=2 if len(choices)<=4 else 3;rows=(len(choices)+cols-1)//cols
+            for n,choice in enumerate(choices):
+                x=.85+(n%cols)*11.7/cols;y=3.15+(n//cols)*3.35/rows
+                box=slide.shapes.add_textbox(Inches(x),Inches(y+.15),Inches(.5),Inches(.45))
+                add_rich_text(box.text_frame.paragraphs[0],choice['label']+'.',24,'327762')
+                raw=base64.b64decode(question['images'][choice['image_index']].split(',',1)[1])
+                with Image.open(io.BytesIO(raw)) as im:w,h=im.size
+                factor=min((11.7/cols-.85)/w,(3.35/rows-.25)/h)
+                slide.shapes.add_picture(io.BytesIO(raw),Inches(x+.65),Inches(y),width=Inches(w*factor),height=Inches(h*factor))
+        elif page.get('flow'):
             flow=page['flow'];height=4.5/len(flow);width=5.1 if diagram else 11.7
             for i,step in enumerate(flow):
                 y=2.05+i*height

@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 
 from .providers import GenerationError
 from .store import digest
+from .scope import scope_matches
 
 
 DDL = '''
@@ -170,7 +171,8 @@ class KnowledgeBase:
                 progress(done)
         return done
 
-    async def search(self, query, subject, grade, region='上海', limit=8, include_graph=False):
+    async def search(self, query, subject, grade, region='上海', limit=8, include_graph=False, scope=None):
+        scope=scope or {}
         vector = (await self.embeddings([subject+'；'+query]))[0]
         with self.connect() as db:
             rows = db.execute('''SELECT id,content,source_type,grades,labels,metadata,embedding_model,embedding_dimensions,
@@ -179,10 +181,23 @@ class KnowledgeBase:
                 FROM kb_chunks WHERE subject=%s AND region IN (%s,'全国')
                     AND (%s=ANY(grades) OR (cardinality(grades)=0 AND phase IN ('',%s)))
                     AND (%s OR source_type<>'graph') AND embedding IS NOT NULL
+                    AND (source_type<>'curriculum' OR %s='' OR COALESCE(NULLIF(metadata->>'curriculum_version',''),metadata->>'version')=%s)
+                    AND (source_type<>'textbook' OR (%s<>'' AND %s<>'' AND %s<>'' AND %s<>''
+                        AND metadata->>'school_system'=%s AND metadata->>'publisher'=%s
+                        AND metadata->>'textbook_version'=%s AND metadata->>'volume'=%s))
                     AND embedding_model=%s AND embedding_dimensions=%s
                 ORDER BY score DESC NULLS LAST LIMIT %s''',
-                (vector,grade,subject,region,grade,phase_for(grade,region),include_graph,self.cfg.embedding_model,self.cfg.embedding_dimensions,limit)).fetchall()
-        return [r for r in rows if r['score'] is not None and r['score']>=0.2]
+                (vector,grade,subject,region,grade,phase_for(grade,region),include_graph,
+                 scope.get('curriculum_version',''),scope.get('curriculum_version',''),
+                 *[scope.get(k,'') for k in ('school_system','publisher','textbook_version','volume')]*2,
+                 self.cfg.embedding_model,self.cfg.embedding_dimensions,limit*4)).fetchall()
+        rows=[r for r in rows if r['score'] is not None and r['score']>=0.2 and scope_matches(r['metadata'],scope,r['source_type'])]
+        # If multiple curriculum editions compete, require an explicit selection.
+        if not scope.get('curriculum_version'):
+            versions={r['metadata'].get('curriculum_version') or r['metadata'].get('version') for r in rows if r['source_type']=='curriculum'}
+            if len(versions)>1:
+                rows=[r for r in rows if r['source_type']!='curriculum']
+        return rows[:limit]
 
     def graph(self, subject='', query='', limit=80):
         with self.connect() as db:

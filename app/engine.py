@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+import shutil
 import time
 import weakref
 import wave
@@ -13,12 +14,13 @@ from uuid import uuid4
 import httpx
 
 from .exam import Exam
-from .exporters import make_slides, write_package
+from .exporters import PRESENTATION_VERSION, make_slides, write_package
 from .kb import KnowledgeBase
 from .models import GenerationOptions, Question, Resource
 from .providers import GenerationError, Qwen, merge_wav
 from .samples import get_sample
 from .store import digest, dump, now
+from .scope import SCOPE_FIELDS, scope_matches, generation_question
 
 log=logging.getLogger(__name__)
 
@@ -72,6 +74,10 @@ class Engine:
                 raise
             except GenerationError as error:
                 self.store.finish(item['id'],error=dict(code=error.code,message=str(error)))
+            except httpx.TimeoutException:
+                self.store.finish(item['id'],error=dict(code='upstream_timeout',message='上游服务请求超时，已保留检查点，可重试当前题目。'))
+            except httpx.RequestError:
+                self.store.finish(item['id'],error=dict(code='upstream_connection',message='上游服务连接中断，已保留检查点，可重试当前题目。'))
             except Exception as error:
                 # 不把上游响应、连接串或凭证放入公开错误。
                 log.error('generation_failed item=%s type=%s',item['id'],type(error).__name__)
@@ -80,7 +86,7 @@ class Engine:
     async def resources(self,question,options):
         resources=[]
         for row in self.store.resources():
-            if row['subject']==question.subject and question.grade in row['grades'] and row['region'] in {question.region,'全国'}:
+            if row['subject']==question.subject and question.grade in row['grades'] and row['region'] in {question.region,'全国'} and scope_matches(row,question.model_dump(),row.get('source_type',row['kind'])):
                 if any(k in question.stem or k in question.knowledge_points for k in row['knowledge_points']):
                     resources.append(row)
         if self.cfg.knowledge_api_url:
@@ -90,20 +96,21 @@ class Engine:
                 response.raise_for_status()
                 for raw in response.json()['resources']:
                     row=Resource.model_validate(raw).model_dump()
-                    if row['subject']==question.subject and question.grade in row['grades'] and row['region'] in {question.region,'全国'}:
+                    if row['subject']==question.subject and question.grade in row['grades'] and row['region'] in {question.region,'全国'} and scope_matches(row,question.model_dump(),row.get('source_type',row['kind'])):
                         resources.append(row)
         if self.cfg.vector_database_url:
             kb=KnowledgeBase(self.cfg)
             stats=await asyncio.to_thread(kb.stats)
             if any(r['embedded'] and r['source_type']!='graph' for r in stats['by_source']):
-                hits=await kb.search(question.stem+' '+' '.join(question.knowledge_points),question.subject,question.grade,question.region)
+                hits=await kb.search(question.stem+' '+' '.join(question.knowledge_points),question.subject,question.grade,question.region,scope=question.model_dump())
                 for hit in hits:
                     meta=hit['metadata']
                     resources.append(dict(id=hit['id'],title=meta['title'],kind='curriculum' if hit['source_type']=='curriculum' else 'knowledge',
                         subject=question.subject,grades=hit['grades'],region=meta.get('region','全国'),content=hit['content'],
                         knowledge_points=hit['labels'],source=meta.get('source','本地知识库'),version=meta.get('version','1'),
                         page=meta.get('page'),match_scope=hit['match_scope'],score=hit['score'],is_sample=False,
-                        extraction=meta.get('extraction','text'),review_status=meta.get('review_status','provided')))
+                        extraction=meta.get('extraction','text'),review_status=meta.get('review_status','provided'),
+                        **{k:meta.get(k,'') for k in SCOPE_FIELDS}))
         if self.cfg.exam_db_host and options.variant_count:
             resources+=await asyncio.to_thread(Exam(self.cfg).variants,question,options.variant_count)
         return sorted(resources,key=lambda r:r.get('is_sample',False))[:16]
@@ -113,16 +120,20 @@ class Engine:
         question=Question.model_validate(json.loads(item['question_json']))
         options=GenerationOptions.model_validate(job['request']['options'])
         context=json.loads(item['context_json']) if item['context_json'] else None
-        if context is None or context.get('version')!=2:
+        context_version=3 if any(getattr(question,k) for k in SCOPE_FIELDS) else 2
+        if context is None or context.get('version')!=context_version:
             resources=[] if options.mode=='sample' else await self.resources(question,options)
-            context=dict(version=2,resources=resources)
+            context=dict(version=context_version,resources=resources)
             self.store.context(item['id'],context)
-        fingerprint=digest(dict(question=question.model_dump(),options=options.model_dump(exclude={'force'}),
+        fingerprint=digest(dict(question=generation_question(question),options=options.model_dump(exclude={'force'}),
             resources=context['resources'],identity=self.cfg.generation_identity()))
         lock=self.locks.setdefault(fingerprint,asyncio.Lock())
         async with lock:
             previous=self.store.find_package(fingerprint)
             if previous and not options.force and (self.cfg.data_dir/'packages'/previous['package_id']/'index.html').exists():
+                if previous.get('presentation',{}).get('version')!=PRESENTATION_VERSION:
+                    self.store.progress(item['id'],'更新课件排版',90)
+                    previous=await asyncio.to_thread(self.restyle,previous)
                 self.store.finish(item['id'],package_id=previous['package_id'],reused=True)
                 return
             checkpoint=self.cfg.data_dir/'work'/item['id']/'checkpoint.json'
@@ -136,7 +147,7 @@ class Engine:
                     review=dict(type='curated_sample',passed=True,note='内置人工编写样例，未调用模型复核')
                 else:
                     lesson,review=await self.qwen.lesson(question,context['resources'],options,
-                        lambda stage,value:self.store.progress(item['id'],stage,value))
+                        lambda stage,value:self.store.progress(item['id'],stage,value),checkpoint=checkpoint.with_name('draft.json'))
                 saved=dict(fingerprint=fingerprint,lesson=lesson,review=review,package_id=uuid4().hex)
                 atomic_json(checkpoint,saved)
             directory=self.cfg.data_dir/'packages'/saved['package_id']
@@ -185,7 +196,7 @@ class Engine:
                 target=max(160,int(sum(len(p['narration']) for p in lesson['pages'])*100/duration))
                 revised,review=await self.qwen.lesson(question,context['resources'],options,
                     lambda stage,value:self.store.progress(item['id'],stage,value),
-                    feedback=f'此题必须保持 simple。上一版实际语音 {duration:.0f} 秒超过120秒。台词总计压缩到 {target} 字符以内，保留推理、图文对应和完整阅读区。')
+                    feedback=f'此题必须保持 simple。上一版实际语音 {duration:.0f} 秒超过120秒。台词总计压缩到 {target} 字符以内，保留推理、图文对应和完整阅读区。',checkpoint=checkpoint.with_name('draft.json'))
                 if revised.get('complexity')!='simple':
                     raise GenerationError('lecture_complexity_changed','精简讲稿时错误改变题目复杂度，未发布结果。')
                 saved.update(lesson=revised,review=review)
@@ -197,6 +208,7 @@ class Engine:
                     old.unlink()
             self.store.progress(item['id'],'装配 HTML、PPTX 与讲解包',92)
             manifest=dict(schema_version='1.1',package_id=saved['package_id'],fingerprint=fingerprint,
+                presentation=dict(version=PRESENTATION_VERSION),
                 created_at=now(),question=question.model_dump(),title=lesson['title'],objective=lesson['objective'],
                 slide_count=len(slides),mode=options.mode,review=saved['review'],voice_mode=voice_mode,
                 reading={key:lesson[key] for key in ('knowledge_points','solution_steps','answer','pitfalls','summary')},
@@ -214,6 +226,26 @@ class Engine:
                 await asyncio.to_thread(self.upload,directory,manifest['object_prefix'])
             self.store.save_package(manifest)
             self.store.finish(item['id'],package_id=manifest['package_id'])
+
+    def restyle(self,previous):
+        """A new immutable presentation of the same reviewed content and audio."""
+        source=self.cfg.data_dir/'packages'/previous['package_id']
+        slides=json.loads((source/'slides.json').read_text(encoding='utf-8'))
+        manifest={**previous,'package_id':uuid4().hex,'created_at':now(),
+                  'presentation':dict(version=PRESENTATION_VERSION,derived_from=previous['package_id'])}
+        directory=self.cfg.data_dir/'packages'/manifest['package_id']
+        directory.mkdir(parents=True,exist_ok=True)
+        if (source/'audio').is_dir():
+            shutil.copytree(source/'audio',directory/'audio')
+        if self.cfg.s3_bucket:
+            manifest['object_prefix']=self.cfg.s3_prefix.strip('/')+'/'+digest(manifest['question']['question_id'])[:16]+'/'+manifest['package_id']
+        else:
+            manifest.pop('object_prefix',None)
+        write_package(directory,manifest,slides)
+        if self.cfg.s3_bucket:
+            self.upload(directory,manifest['object_prefix'])
+        self.store.save_package(manifest)
+        return manifest
 
     def upload(self,directory,prefix):
         import boto3

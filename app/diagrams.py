@@ -71,11 +71,17 @@ class NumberLine(Figure):
             if a is not None and not self.minimum < a < self.maximum or b is not None and not self.minimum < b < self.maximum:
                 raise ValueError('有限端点必须位于数轴范围内部')
             if a is not None and b is not None and a >= b:
-                raise ValueError('区间左端点必须小于右端点')
+                raise ValueError(f'区间“{interval.label}”的 start={a} 必须小于 end={b}；右射线 end=null，左射线 start=null，不能用相等端点表示射线')
             if a is None and interval.start_closed or b is None and interval.end_closed:
                 raise ValueError('无穷端点不能闭合')
-            if any(x is not None and x not in self.ticks for x in (a, b)):
-                raise ValueError('有限端点必须标注刻度')
+            # Endpoints determine the mathematics; tick labels are presentation.
+            # Add missing labels without moving endpoints or changing inclusivity.
+        endpoints={x for interval in self.intervals for x in (interval.start,interval.end) if x is not None}
+        self.ticks=sorted(endpoints|set(x for x in self.ticks if x not in endpoints))
+        if len(self.ticks)>11:
+            mandatory=endpoints|{self.ticks[0],self.ticks[-1]}
+            optional=[x for x in self.ticks if x not in mandatory]
+            self.ticks=sorted(mandatory|set(optional[:11-len(mandatory)]))
         return self
 
 
@@ -117,8 +123,8 @@ class Cartesian(Figure):
 
 class Vertex(ShapeModel):
     id: str = Field(min_length=1, max_length=8)
-    x: float = Field(ge=0, le=10)
-    y: float = Field(ge=0, le=10)
+    x: float = Field(ge=-1e6, le=1e6, description='几何关系坐标，可负；绘制时等比例缩放')
+    y: float = Field(ge=-1e6, le=1e6)
     label: str = Field(default='', max_length=18)
 
 
@@ -131,7 +137,7 @@ class Segment(ShapeModel):
 
 class Circle(ShapeModel):
     center: str
-    radius: float = Field(gt=0, le=5)
+    radius: float = Field(gt=0, le=1e6)
 
 
 class Geometry(Figure):
@@ -151,9 +157,6 @@ class Geometry(Figure):
         for circle in self.circles:
             if circle.center not in lookup:
                 raise ValueError('圆心引用无效')
-            v = lookup[circle.center]
-            if min(v.x, v.y, 10-v.x, 10-v.y) < circle.radius:
-                raise ValueError('圆超出绘图区域')
         return self
 
 
@@ -289,9 +292,16 @@ def render_diagram(spec):
             x,y=sx(point.x),sy(point.y);c.circle(x,y,5,GOLD,GOLD)
             c.text(x+10 if x<560 else x-10,y-12,point.label or f'({point.x:g}, {point.y:g})',16,GOLD,'start' if x<560 else 'end')
     elif isinstance(d, Geometry):
-        points={v.id:(235+v.x*33,360-v.y*33) for v in d.vertices}
+        lookup={v.id:v for v in d.vertices}
+        xs=[v.x for v in d.vertices];ys=[v.y for v in d.vertices]
         for circle in d.circles:
-            x,y=points[circle.center];c.circle(x,y,circle.radius*33,fill='none')
+            v=lookup[circle.center]
+            xs.extend([v.x-circle.radius,v.x+circle.radius]);ys.extend([v.y-circle.radius,v.y+circle.radius])
+        left,right,bottom,top=min(xs),max(xs),min(ys),max(ys)
+        scale=min(620/max(right-left,1e-6),290/max(top-bottom,1e-6))
+        points={v.id:(400+(v.x-(left+right)/2)*scale,195-(v.y-(top+bottom)/2)*scale) for v in d.vertices}
+        for circle in d.circles:
+            x,y=points[circle.center];c.circle(x,y,circle.radius*scale,fill='none')
         for s in d.segments:
             a,b=points[s.start],points[s.end];c.line([a,b],dashed=s.dashed)
             if s.label:c.text((a[0]+b[0])/2+12,(a[1]+b[1])/2-12,s.label,18,GOLD)

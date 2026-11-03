@@ -5,18 +5,37 @@ import json
 import re
 import wave
 from urllib.parse import urlparse
+from pathlib import Path
 
 import httpx
 
 from .models import IllustratedLesson, Review
 from .diagrams import render_diagram
-from .store import dump
+from .store import dump, digest
 
 
 class GenerationError(Exception):
-    def __init__(self, code, message):
+    def __init__(self, code, message, candidate=None):
         super().__init__(message)
         self.code = code
+        self.candidate = candidate
+
+
+async def post_with_retry(client, url, *, progress=None, **kwargs):
+    """Retry transient transport failures in the current stage, never authentication errors."""
+    for attempt in range(3):
+        try:
+            response = await client.post(url, **kwargs)
+            if response.status_code not in {429, 502, 503, 504} or attempt == 2:
+                return response
+            reason = f'接口暂不可用（HTTP {response.status_code}）'
+        except (httpx.TimeoutException, httpx.RequestError) as error:
+            if attempt == 2:
+                raise
+            reason = '请求超时' if isinstance(error, httpx.TimeoutException) else '连接中断'
+        if progress:
+            progress(f'{reason}，当前阶段自动重试 {attempt+1}/2')
+        await asyncio.sleep(2**attempt)
 
 
 SYSTEM = '''你是中小学课件生成与独立复核引擎。只返回完整 JSON。
@@ -34,7 +53,7 @@ class Qwen:
     def __init__(self, settings):
         self.settings = settings
 
-    async def json(self, instruction, data, schema, images=()):
+    async def json(self, instruction, data, schema, images=(), progress=None):
         cfg = self.settings
         if not cfg.dashscope_api_key:
             raise GenerationError('qwen_not_configured', '尚未配置千问 API Key，请配置 DASHSCOPE_API_KEY 后重试。')
@@ -46,7 +65,7 @@ class Qwen:
                        response_format={'type': 'json_object'})
         try:
             async with httpx.AsyncClient(timeout=cfg.qwen_timeout, trust_env=False) as client:
-                response = await client.post(cfg.qwen_base_url.rstrip('/')+'/chat/completions', json=payload,
+                response = await post_with_retry(client, cfg.qwen_base_url.rstrip('/')+'/chat/completions', progress=progress, json=payload,
                                              headers={'Authorization': 'Bearer '+cfg.dashscope_api_key})
             if response.status_code != 200:
                 raise GenerationError('qwen_http', f'千问接口返回 HTTP {response.status_code}，请检查模型、额度和凭证。')
@@ -61,10 +80,10 @@ class Qwen:
         except (KeyError, IndexError, ValueError) as error:
             if hasattr(error, 'errors'):
                 detail = '；'.join('.'.join(map(str,e['loc']))+': '+e['msg'] for e in error.errors(include_input=False))[:1600]
-                raise GenerationError('qwen_structure', '课件结构需修正：'+detail) from error
+                raise GenerationError('qwen_structure', '课件结构需修正：'+detail, result['message']['content']) from error
             raise GenerationError('qwen_structure', '千问返回内容未通过结构校验，请重试。') from error
 
-    async def lesson(self, question, resources, options, progress, feedback=None):
+    async def lesson(self, question, resources, options, progress, feedback=None, checkpoint=None):
         data = dict(question={**question.model_dump(), 'images': ['见附件']*len(question.images)},
                     resources=resources, depth=options.depth, variant_count=options.variant_count,
                     knowledge_resource_catalog=[dict(id=r['id'],title=r['title']) for r in resources if r.get('kind') in {'knowledge','curriculum'}])
@@ -87,8 +106,8 @@ class Qwen:
                        '每页 narration 是实际朗读台词，不是把 display 再读一次；明确解释依据、怎样看图、怎样用于本题。'
                        '知识页上屏只留2–3个短句或公式，建议60–120字，不写长段落；较长推理放 notes，台词也简明。'
                        '凡数轴、区间、函数、几何、电路、物质关系适合可视化的知识页，应使用 diagram，图要解释关系而非装饰。'
-                       'number_line 用 null 表示无穷，含等号端点实心，数值与方向必须与本题一致；可用多行比较本题与反例，注明反例。'
-                       'cartesian 支持一次/二次函数，系数[a,b,c]、标注点必须准确；geometry 为0–10坐标范围的几何关系示意；'
+                       'number_line 的 start 是左端点、end 是右端点，start<end。右射线 x≥a 填 start=a,end=null,start_closed=true,end_closed=false；左射线 x<a 填 start=null,end=a,start_closed=false,end_closed=false。禁止用两个相等端点表示射线或单点。minimum/maximum 是可见数轴范围，有限端点必须在内部且出现在 ticks。可用多行比较本题与反例，注明反例。'
+                       'cartesian 支持一次/二次函数，系数[a,b,c]、标注点必须准确；geometry 使用实际比例关系坐标，可含负坐标，由服务端等比例缩放；方位角用 geometry 标注东西南北，不用 number_line 冒充方向图；'
                        'circuit 只适合简单电阻串并联，不可省略关键开关冒充原电路；process 用于有因果关系的知识，不适合绘图时 diagram=null 并说明原因。'
                        '图中标签用纯文本 Unicode 数学符号，不使用 LaTeX。caption 说明图如何帮助本题，示意图与原题附件区分。'
                        'knowledge_indices 和 solution_indices 使用从0开始的索引覆盖全部知识与解题步骤；必要时在同一页合并相关步骤。'
@@ -98,17 +117,38 @@ class Qwen:
         instruction += ('自拟变式优先使用不依赖图片的文字解答题，题干包含全部条件，答案给出实际结果；'
                         '不要生成缺少选项或选项图的选择题，不得用 A/B/C/D 代替不存在的选项。课件标题用简短自然语言，公式放正文。')
         candidate, reports = None, []
+        cache_key = digest(dict(data=data, instruction=instruction, identity=self.settings.generation_identity()))
+        checkpoint = Path(checkpoint) if checkpoint else None
+        cached = json.loads(checkpoint.read_text(encoding='utf-8')) if checkpoint and checkpoint.exists() else {}
+        resume = cached.get('key') == cache_key and cached.get('phase') == 'review'
+        start_attempt = cached.get('attempt',0) if resume else 0
+        if resume:
+            reports = cached.get('reports',[])
+            candidate = IllustratedLesson.model_validate(cached['candidate'])
+
+        def save_draft(phase, attempt, draft=None):
+            if checkpoint:
+                checkpoint.parent.mkdir(parents=True,exist_ok=True)
+                temp=checkpoint.with_suffix('.tmp')
+                temp.write_text(dump(dict(key=cache_key,phase=phase,attempt=attempt,reports=reports,candidate=draft)),encoding='utf-8')
+                temp.replace(checkpoint)
         # 首次 + 最多三轮纠错；每轮重新独立复核。
-        for attempt in range(4):
+        for attempt in range(start_attempt,4):
             progress('生成结构化课件' if not attempt else f'纠错与重写 · 第 {attempt} 轮', 20 + attempt*8)
             try:
-                candidate = await self.json(instruction, data, IllustratedLesson, question.images)
+                if not (resume and attempt==start_attempt):
+                    candidate = await self.json(instruction, data, IllustratedLesson, question.images,
+                        progress=lambda message:progress('生成课件 · '+message,20+attempt*8))
             except GenerationError as error:
                 if error.code != 'qwen_structure':
                     raise
                 errors = [str(error)]
                 reports.append(dict(round=attempt, report=None, errors=errors))
                 data['repair_feedback'] = errors
+                if error.candidate:
+                    data['previous_candidate'] = error.candidate
+                progress('结构校验未通过：'+str(error),20+attempt*8)
+                save_draft('repair',attempt,error.candidate)
                 continue
             if len(candidate.variants) != options.variant_count:
                 errors = ['变式题数量不符合请求']
@@ -125,6 +165,7 @@ class Qwen:
                     verify_variants(candidate, resources)
                     bind_knowledge_sources(candidate, resources)
                     figures = [render_diagram(p.diagram.model_dump()) for p in candidate.pages if p.diagram]
+                    save_draft('review',attempt,candidate.model_dump())
                     progress('独立核对知识、配图与解题依据', 55 + attempt*5)
                     report = await self.json('独立复核候选。逐项核对知识与计算正确性、原始条件、全部小题覆盖、学段适配和变式题答案。'
                         '附件先是原题图片，其后按 pages 顺序是服务端绘制的知识示意图。'
@@ -135,13 +176,21 @@ class Qwen:
                         '核对实际 pages 的台词、显示和配图也覆盖必要推理，与阅读区答案一致，不能只检查详细解题。'
                         '解题页实际显示 solution_indices 对应的 title/display 流程节点，按各步骤 narration 依次朗读；page.display 是摘要，不能把摘要代替节点检查。'
                         '每项写出核对依据，errors 仅列确定错误；无错误返回空数组。不得因风格偏好要求重写。',
-                        {**data, 'candidate': candidate.model_dump()}, Review, [*question.images, *[f['png'] for f in figures]])
+                        {**data, 'candidate': candidate.model_dump()}, Review, [*question.images, *[f['png'] for f in figures]],
+                        progress=lambda message:progress('独立复核 · '+message,55+attempt*5))
                     errors = report.errors()
                 except ValueError as error:
                     errors, report = [str(error)], None
+                except GenerationError as error:
+                    if error.code!='qwen_structure':
+                        raise
+                    errors, report = ['复核报告格式未通过：'+str(error)], None
             reports.append(dict(round=attempt, report=report.model_dump() if report else None, errors=errors))
             if not errors:
+                save_draft('passed',attempt,candidate.model_dump())
                 return candidate.model_dump(), dict(type='qwen_independent_review', passed=True, rounds=reports)
+            progress('复核需修正：'+'；'.join(errors)[:1600],55+attempt*5)
+            save_draft('repair',attempt,candidate.model_dump())
             data = {**data, 'previous_candidate': candidate.model_dump(), 'repair_feedback': errors}
         raise GenerationError('review_failed', '独立复核未通过，已完成三轮纠错：'+'；'.join(errors)[:1200])
 
@@ -151,7 +200,7 @@ class Qwen:
         audios = []
         async with httpx.AsyncClient(timeout=cfg.qwen_timeout, trust_env=False) as client:
             for chunk in chunks:
-                response = await client.post(cfg.qwen_tts_url,
+                response = await post_with_retry(client, cfg.qwen_tts_url,
                     headers={'Authorization': 'Bearer '+cfg.dashscope_api_key},
                     json=dict(model=cfg.qwen_tts_model, input=dict(text=chunk, voice=cfg.qwen_tts_voice, language_type='Chinese')))
                 if response.status_code != 200:
