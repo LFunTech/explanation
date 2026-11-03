@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     exam_db_name: str = 'exam'
     exam_db_user: str = ''
     exam_db_password: str = ''
+    exam_minio_endpoint: str = ''
+    exam_minio_region: str = 'us-east-1'
+    exam_minio_access_key: str = ''
+    exam_minio_secret_key: str = ''
+    exam_minio_allowed_buckets: str = ''
 
     def validate_runtime(self):
         if self.tts_mode not in {'browser', 'qwen', 'none'}:

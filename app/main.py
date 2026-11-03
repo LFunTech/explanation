@@ -2,48 +2,28 @@ import asyncio
 import base64
 import hashlib
 import hmac
-import io
 import json
 import mimetypes
 import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from PIL import Image
 from pydantic import BaseModel, Field
 
 from .config import ROOT, Settings
 from .engine import Engine, package_links, signed_token
 from .exam import Exam
+from .images import normalize_image
 from .kb import KnowledgeBase, document_chunks
 from .models import JobRequest, ResourceImport
 from .providers import GenerationError
 from .samples import SAMPLES, seed_resources
 from .store import Conflict, Store, digest
-
-
-def normalize_image(value):
-    if not re.match(r'^data:image/(png|jpeg|webp);base64,',value):
-        raise ValueError('图片须为上传接口返回的 data URL，支持 PNG、JPEG 和 WebP')
-    try:
-        raw=base64.b64decode(value.split(',',1)[1],validate=True)
-        if len(raw)>8*1024*1024:
-            raise ValueError('单图不能超过 8 MB')
-        with Image.open(io.BytesIO(raw)) as image:
-            if image.width*image.height>20_000_000:
-                raise ValueError('图片像素过大，请压缩后上传')
-            image.load()
-            # 统一栅格编码，移除元数据，不接收 SVG 或脚本。
-            image.thumbnail((2200,2200))
-            output=io.BytesIO(); image.convert('RGB').save(output,format='JPEG',quality=88)
-        return 'data:image/jpeg;base64,'+base64.b64encode(output.getvalue()).decode('ascii')
-    except (OSError,Image.DecompressionBombError) as error:
-        raise ValueError('图片内容无法解码') from error
 
 
 def create_app(settings=None):
@@ -157,6 +137,9 @@ def create_app(settings=None):
             raise HTTPException(422,'回调地址须由服务端配置到 CALLBACK_ALLOWED_URLS，且须配置签名密钥')
         try:
             for question in body.questions:
+                if (question.requires_images and not question.images and question.question_id.startswith('exam:public:')
+                        and question.source=='exam/public/question/'+question.question_id.removeprefix('exam:public:')):
+                    question.images=Exam(cfg).images(question.question_id)['images']
                 question.images=[normalize_image(i) for i in question.images]
                 if question.requires_images and not question.images:
                     raise ValueError('这道题含图片附件，请先上传原题图片，避免缺图生成错误讲解。')
@@ -224,6 +207,10 @@ def create_app(settings=None):
         if len(query)>200:
             raise HTTPException(422,'搜索词过长')
         return await asyncio.to_thread(Exam(cfg).search,subject,grade,query)
+
+    @app.get('/api/exam/questions/{question_id}/images')
+    async def exam_images(question_id:UUID):
+        return await asyncio.to_thread(Exam(cfg).images,str(question_id))
 
     @app.get('/api/exam/questions/random')
     async def random_questions(subject:str=Query(default='数学',max_length=30),

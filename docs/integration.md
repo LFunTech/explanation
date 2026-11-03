@@ -4,6 +4,8 @@
 
 随机选题使用 `GET /api/exam/questions/random`：支持 `subject`、`grade`、`region`、`limit`（默认 3，最多 6）和 `exclude`（逗号分隔的上一批题目 ID）。在当前学科和对应学段的 ACTIVE 题目中随机抽取；候选不足时允许补回上一批题目，同批 ID 不重复。未标注具体年级时继续返回范围说明，不将学段匹配冒充年级匹配。
 
+题图读取使用 `GET /api/exam/questions/{公共题目UUID}/images`，返回 `{question_id,images:[data_url],attachments:[{id,usage_type,sort_order}]}`。仅解析该 ACTIVE 公共题目的附件关联，按排序去重；不接受请求方传入对象地址。答案/解析专用附件不当作原题图。所有原图下载成功后一次返回，最多 8 张，单图最大 8 MB。MinIO 访问配置由服务端保管。
+
 ## 请求
 
 `POST /api/jobs` 返回 HTTP 202。可携带 `Idempotency-Key`（最大 200 字符）；同键同内容返回同一任务，同键不同内容返回 409。请求 JSON 格式见 README 和 `/docs`。
@@ -18,7 +20,7 @@
 | subject / grade / region | 学科、年级、区域；区域默认上海 |
 | knowledge_points / knowledge_point_ids | 知识点名称，以及可选 exam 公共知识点 ID |
 | question_type / difficulty | 题型；难度为基础、中等、较难 |
-| source / requires_images | 来源引用；需要图片但没有上传图片时返回 422 |
+| source / requires_images | 来源引用；源 ID 对应 exam 公共题目且缺图时自动读取 MinIO。其他缺图输入返回 422；存储不可用时明确返回错误 |
 | options.mode | qwen 或 sample；样例必须与内置题及范围完全相同 |
 | options.depth | brief、standard、deep |
 | options.variant_count | 0—5；内置样例最多 2 道 |

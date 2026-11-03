@@ -11,6 +11,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .kb import phase_for
+from .exam_storage import ExamImageStorage
 from .models import Question
 from .providers import GenerationError
 
@@ -48,10 +49,14 @@ def parse_stem(value):
         body=None
     if not isinstance(body,dict) or 'stem' not in body:
         stem,images=plain(value)
-        return dict(stem=stem,options=[],sub_questions=[],image_urls=images,requires_images=bool(images))
+        return dict(stem=stem,options=[],sub_questions=[],image_urls=images,
+            requires_images=bool(images) or bool(re.search(r'<img\b',value or '',re.I)))
     images=[]
-    def text(value):
-        result,assets=plain(str(value or ''));images.extend(assets);return result
+    def text(value,collect_images=True):
+        result,assets=plain(str(value or ''))
+        if collect_images:
+            images.extend(assets)
+        return result
     def options(values):
         result=[]
         for index,option in enumerate(values or []):
@@ -73,10 +78,14 @@ def parse_stem(value):
         if sub.get('prompt'):
             content+='\n'+text(sub['prompt'])
         content+=''.join('\n'+entry for entry in options(sub.get('options',[])))
-        sub_questions.append(dict(id=str(sub.get('label') or index+1),stem=content.strip() or '请结合共用题干作答。',answer=text(sub.get('answer')),analysis=text(sub.get('analysis'))))
+        sub_questions.append(dict(id=str(sub.get('label') or index+1),stem=content.strip() or '请结合共用题干作答。',answer=text(sub.get('answer'),False),analysis=text(sub.get('analysis'),False)))
     def has_assets(node):
         if isinstance(node,dict):
-            return any(bool(value) if key in {'attachments','inlineAssets','answerInlineAssets','analysisInlineAssets'} else has_assets(value) for key,value in node.items())
+            return any(any(not isinstance(asset,dict) or str(asset.get('usageType') or 'MATERIAL').upper() not in {'ANSWER','ANALYSIS','SOLUTION'} for asset in (value or []))
+                if key in {'attachments','inlineAssets'} else has_assets(value)
+                for key,value in node.items() if key not in {'answerInlineAssets','analysisInlineAssets','answer','analysis'})
+        if isinstance(node,str) and re.search(r'<img\b',node,re.I):
+            return True
         return isinstance(node,list) and any(has_assets(v) for v in node)
     parsed_options=options(body.get('options',[]))
     requires_images=bool(images) or has_assets(body)
@@ -119,7 +128,8 @@ class Exam:
                         JOIN public.knowledge_point k ON k.id=r.knowledge_point_id WHERE r.question_id=q.id AND k.effective_enabled),'{}') AS knowledge_ids,
                     COALESCE((SELECT array_agg(DISTINCT g.grade_name) FROM public.question_grade qg
                         JOIN tenant_kg.grade g ON g.grade_code=qg.grade_code WHERE qg.question_id=q.id),'{}') AS grades,
-                    EXISTS(SELECT 1 FROM public.question_attachment a WHERE a.question_id=q.id) AS has_attachments
+                    EXISTS(SELECT 1 FROM public.question_attachment a WHERE a.question_id=q.id
+                        AND upper(COALESCE(a.usage_type,'MATERIAL')) NOT IN ('ANSWER','ANALYSIS','SOLUTION')) AS has_attachments
                 FROM public.question q WHERE q.status='ACTIVE' AND q.subject_code=%s
                     AND (%s='' OR q.stem ILIKE %s OR EXISTS(SELECT 1 FROM public.question_taxonomy_relation r
                         JOIN public.knowledge_point k ON k.id=r.knowledge_point_id WHERE r.question_id=q.id AND k.knowledge_point_name ILIKE %s))
@@ -165,6 +175,38 @@ class Exam:
                 exclude_ids=[row['id'] for row in rows],region=region)
             rows.extend(extra)
         return rows
+
+    def images(self,question_id):
+        """关联只在公共题库内查询；下载全成功后一次性返回，避免缺图提交。"""
+        from uuid import UUID
+        try:
+            question_id=str(UUID(question_id.removeprefix('exam:public:')))
+        except ValueError:
+            raise GenerationError('exam_question_missing','题库题目标识无效。') from None
+        with self.connect() as db:
+            question=db.execute("SELECT stem FROM public.question WHERE id=%s AND status='ACTIVE'",(question_id,)).fetchone()
+            if not question:
+                raise GenerationError('exam_question_missing','题库题目不存在或已停用。')
+            rows=db.execute('''SELECT a.id::text,a.source_uri,a.file_id::text,a.usage_type,a.sort_order,
+                    f.bucket_name,f.object_key FROM public.question_attachment a
+                LEFT JOIN public.file_metadata f ON f.id::text=a.file_id::text
+                WHERE a.question_id=%s AND upper(COALESCE(a.usage_type,'MATERIAL')) NOT IN ('ANSWER','ANALYSIS','SOLUTION')
+                ORDER BY a.sort_order,a.id''',(question_id,)).fetchall()
+        locations=[]
+        for row in rows:
+            uri=row['source_uri'] or ('minio://'+row['bucket_name']+'/'+row['object_key'].lstrip('/') if row['bucket_name'] and row['object_key'] else '')
+            if not uri:
+                raise GenerationError('exam_image_missing','题库已关联图片，但缺少可读取的存储位置，请补充原图。')
+            if uri not in [entry[0] for entry in locations]:
+                locations.append((uri,row))
+        if not locations and parse_stem(question['stem'])['requires_images']:
+            raise GenerationError('exam_image_missing','题干引用了图片，但公共题库尚未同步附件关联，请补充原图。')
+        if len(locations)>8:
+            raise GenerationError('exam_image_count','该题包含超过 8 张原图，请先整理后上传。')
+        storage=ExamImageStorage(self.cfg)
+        images=[storage.read(uri) for uri,row in locations]
+        return dict(question_id='exam:public:'+question_id,images=images,
+            attachments=[dict(id=row['id'],usage_type=row['usage_type'],sort_order=row['sort_order']) for _,row in locations])
 
     def variants(self,question,limit):
         if not limit or not (question.knowledge_point_ids or question.knowledge_points):

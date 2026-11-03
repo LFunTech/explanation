@@ -10,3 +10,5 @@
 .random-question .arrow{flex-shrink:0;margin-top:4px}
 .random-question .katex{font-size:1em}
 .random-question .katex-display{margin:.2em 0}
+
+.image-chip{max-width:100%}.image-chip img{width:auto;height:auto;max-width:100%;max-height:240px;object-fit:contain;background:white}
