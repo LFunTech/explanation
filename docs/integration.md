@@ -44,6 +44,10 @@ HTTP 202 仅表示已持久化受理，不代表生成成功。任务在服务�
 
 一题完成后立即提供 HTML、PPTX、ZIP、manifest 地址及变式数组。原题 ID 在 `items[].question_id` 和包内 `manifest.question.question_id` 中一致。题库变式 `source=resource`，ID 为实际资源 ID；自拟变式 `source=generated`，ID 为 null，接收侧不能把它当已有题库记录。
 
+`manifest.schema_version=1.1` 的 `slides` 为主讲解页：简单题 3–5 页、复杂题最多 10 页，题干与原图合并在原题页。完整知识说明、解题步骤、答案、易错和总结位于 `manifest.reading`，相关变式仍在 `manifest.variants`，HTML 提供展开阅读。`quality` 记录 `page_count/page_limit/diagram_count/audio_duration_seconds/duration_limit_seconds`；仅千问语音存在实测时长，其他模式为 null。独立内容复核包含实际知识示意图与逐页台词，不代表教师验收。
+
+解题页的 `flow` 是 `{number,title,display,narration}` 数组，`cues` 是 `{node,start_seconds,end_seconds}` 数组；`node` 从 0 开始，时间相对当前页 WAV，按各节点实际合成时长计算。单页 WAV 按节点顺序无损合并，暂停/继续不重置当前节点，翻页停止旧页音频。知识点 `resource_ids` 指向 `manifest.resources` 中实际采用的课标或知识资源；空数组表示没有对应引用，不能对外声称已匹配课标。
+
 ## 回调
 
 所有题目结束后入队 `explanation.completed` 事件，包括部分失败。回调 POST JSON：
@@ -86,7 +90,9 @@ courseware.pptx         # 16:9 PPTX + 每页演讲者备注
 manifest.json           # 原题、资源出处、复核摘要、语音模式与变式关联
 slides.json             # 稳定 page_id、display、notes、narration 和音频
 narration.json          # page_id → 台词 → audio_file
-audio/page-001.wav      # 仅千问语音模式存在
+audio/page-001-{hash}.wav # 仅千问语音模式存在；hash 绑定台词，重写不复用旧音频
+figures/page-002.svg    # 按需生成的知识图；HTML 内嵌同一 SVG
+figures/page-002.png    # 相同绘图指令输出，供 PPTX 和模型图文复核
 package.zip
 ```
 

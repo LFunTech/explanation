@@ -48,8 +48,12 @@ async def test_package_reuse_and_force_preserve_previous_version(tmp_path):
         html=archive.read('index.html').decode('utf-8')
         assert 'data:font/woff2;base64,' in html and '/*PLAYER_JS*/' not in html
     with zipfile.ZipFile(package/'courseware.pptx') as archive:
-        assert len([n for n in archive.namelist() if n.startswith('ppt/slides/slide') and n.endswith('.xml')])>=10
+        assert 3<=len([n for n in archive.namelist() if n.startswith('ppt/slides/slide') and n.endswith('.xml')])<=5
         assert any(n.startswith('ppt/notesSlides/notesSlide') for n in archive.namelist())
+    manifest=json.loads((package/'manifest.json').read_text(encoding='utf-8'))
+    assert manifest['reading']['solution_steps']==SAMPLES[0]['lesson']['solution_steps']
+    assert manifest['reading']['knowledge_points']==SAMPLES[0]['lesson']['knowledge_points']
+    assert manifest['variants']==SAMPLES[0]['lesson']['variants']
     second,_=store.create_job(request())
     await engine.generate(store.claim())
     reused=store.job(second)['items'][0]

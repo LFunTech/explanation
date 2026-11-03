@@ -10,9 +10,11 @@ from latex2mathml.converter import convert
 from lxml import etree
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
 from pptx.util import Inches, Pt
 
 from .config import ROOT
+from .diagrams import render_diagram
 from .store import dump
 
 
@@ -43,41 +45,38 @@ def paginate(text, capacity=330):
 
 
 def make_slides(question, lesson):
-    slides = []
-
-    def add(kind, title, display, notes='', **extra):
-        pages = paginate(display)
-        for index, page in enumerate(pages):
-            suffix = f' · {index+1}/{len(pages)}' if len(pages) > 1 else ''
-            note = notes if index == len(pages)-1 else ''
-            slides.append(dict(id=f'page-{len(slides)+1:03}', kind=kind, title=title+suffix,
-                               display=page, notes=note, narration=plain_text(page+'\n'+note), **extra))
-
-    add('导入', lesson['title'], lesson['objective'], '本节课我们围绕这道题，先理解相关知识，再完成解题与迁移练习。')
-    original = question['stem'] + ''.join('\n'+v for v in question['options'])
-    original += ''.join('\n（'+q['id']+'）'+q['stem'] for q in question['sub_questions'])
-    add('原题', '一起读题', original)
-    for index, image in enumerate(question['images']):
-        add('原题', f'题目配图 {index+1}', '结合题干观察图片中的条件与关系。', image=image)
-    for point in lesson['knowledge_points']:
-        add('知识', point['title'], point['display'], point['notes'])
-    for point in lesson['solution_steps']:
-        add('解题', point['title'], point['display'], point['notes'])
-    add('答案', '回到问题，给出答案', lesson['answer'])
-    for point in lesson['pitfalls']:
-        add('易错', point['title'], point['display'], point['notes'])
-    add('总结', '把解题方法带走', '\n'.join('• '+x for x in lesson['summary']))
-    for index, variant in enumerate(lesson['variants']):
-        label = '题库变式' if variant['source'] == 'resource' else '自拟变式'
-        add('变式', f'举一反三 · {index+1}', variant['stem'], variant_source=label, question_id=variant['question_id'])
-        add('变式解析', f'变式 {index+1} · 思路与答案', variant['answer'], variant['analysis'])
+    pages = lesson.get('pages')
+    if not pages:
+        # Curated legacy samples: keep the full source in the reading section,
+        # group connected calculations instead of one page per arithmetic action.
+        pages = [dict(kind='原题', title='从这道题出发', display=lesson['objective'], narration=lesson['objective'])]
+        pages += [dict(kind='知识', title=p['title'], display=p['display'], narration=p['notes']) for p in lesson['knowledge_points']]
+        pages += [dict(kind='解题', title='把知识用到题目中', display='\n'.join(p['display'] for p in lesson['solution_steps']),
+                       narration='\n'.join(p['notes'] for p in lesson['solution_steps']),solution_indices=list(range(len(lesson['solution_steps'])))),
+                  dict(kind='答案', title='答案与检验', display=lesson['answer'], narration=lesson['answer']+'\n'+lesson['pitfalls'][0]['notes'])]
+    if len(pages)>10:
+        raise ValueError('主讲解不能超过 10 页')
+    slides=[]
+    for page in pages:
+        slide=dict(id=f'page-{len(slides)+1:03}',kind=page['kind'],title=page['title'],display=page['display'],
+                   notes=page['narration'],narration=plain_text(page['narration']))
+        if page['kind']=='解题' and page.get('solution_indices'):
+            slide['flow']=[dict(number=i+1,title=lesson['solution_steps'][i]['title'],display=lesson['solution_steps'][i]['display'],
+                                narration=plain_text(lesson['solution_steps'][i].get('narration',lesson['solution_steps'][i]['notes']))) for i in page['solution_indices']]
+            slide['narration']='\n'.join(step['narration'] for step in slide['flow'])
+            slide['notes']=slide['narration']
+        if page['kind']=='原题':
+            slide['original']=True
+        if page.get('diagram'):
+            slide['diagram']=render_diagram(page['diagram'])
+        slides.append(slide)
     return slides
 
 
 def plain_text(text):
     text = re.sub(r'\\(?:mathrm|text|operatorname)\{([^{}]*)\}', r'\1', text)
     text = re.sub(r'\\frac\{([^{}]*)\}\{([^{}]*)\}', r'(\1) 除以 (\2)', text)
-    for key, value in {'\\times':'乘以','\\div':'除以','\\ne':'不等于','\\le':'小于等于','\\ge':'大于等于','\\Omega':'欧姆','\\,':'','^2':'的平方','^3':'的三次方'}.items():
+    for key, value in {'\\times':'乘以','\\div':'除以','\\neq':'不等于','\\ne':'不等于','\\leq':'小于等于','\\geq':'大于等于','\\le':'小于等于','\\ge':'大于等于','\\Omega':'欧姆','\\,':'','^2':'的平方','^3':'的三次方'}.items():
         text = text.replace(key, value)
     return re.sub(r'[$#*_{}]', '', text)
 
@@ -168,7 +167,30 @@ def export_pptx(path, slides, manifest):
                                        (12,6.95,.6,.3,f'{index+1:02}',11,'327762')]:
             box=slide.shapes.add_textbox(Inches(x),Inches(y),Inches(w),Inches(h))
             add_rich_text(box.text_frame.paragraphs[0],text,size,color)
-        if page.get('image'):
+        diagram=page.get('diagram')
+        original=page.get('original')
+        if original:
+            question=manifest['question']
+            display=question['stem']+'\n'+'\n'.join(question['options'])+'\n'+'\n'.join('（'+q['id']+'）'+q['stem'] for q in question['sub_questions'])
+        else:
+            display=page['display']
+        if page.get('flow'):
+            flow=page['flow'];height=4.5/len(flow);width=5.1 if diagram else 11.7
+            for i,step in enumerate(flow):
+                y=2.05+i*height
+                node=slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,Inches(.8),Inches(y),Inches(width),Inches(height-.2))
+                node.fill.solid();node.fill.fore_color.rgb=RGBColor.from_string('EFF5E8')
+                node.line.color.rgb=RGBColor.from_string('B9CCAE')
+                frame=node.text_frame;frame.word_wrap=True
+                add_rich_text(frame.paragraphs[0],step['title'],14,'327762')
+                add_rich_text(frame.add_paragraph(),step['display'],17 if len(flow)<4 else 15,'243E36')
+                if i<len(flow)-1:
+                    arrow=slide.shapes.add_shape(MSO_SHAPE.DOWN_ARROW,Inches(.8+width/2-.1),Inches(y+height-.19),Inches(.2),Inches(.17))
+                    arrow.fill.solid();arrow.fill.fore_color.rgb=RGBColor.from_string('6F9577');arrow.line.fill.background()
+            if diagram:
+                raw=base64.b64decode(diagram['png'].split(',',1)[1])
+                slide.shapes.add_picture(io.BytesIO(raw),Inches(6.1),Inches(2.6),width=Inches(6.5),height=Inches(3.25))
+        elif page.get('image'):
             raw=base64.b64decode(page['image'].split(',',1)[1])
             from PIL import Image
             with Image.open(io.BytesIO(raw)) as image:
@@ -176,19 +198,40 @@ def export_pptx(path, slides, manifest):
             factor=min(11/width,4.4/height)
             slide.shapes.add_picture(io.BytesIO(raw),Inches((13.333-width*factor)/2),Inches(2.15),width=Inches(width*factor),height=Inches(height*factor))
         else:
-            box=slide.shapes.add_textbox(Inches(.8),Inches(2.35),Inches(11.65),Inches(4.3))
+            has_images=original and manifest['question']['images']
+            box=slide.shapes.add_textbox(Inches(.8),Inches(2.05),Inches(4.7 if diagram else 11.65),Inches(2.1 if has_images else 4.4))
             box.text_frame.word_wrap=True
-            size=23 if len(page['display'])<220 else 19
-            for n,line in enumerate(page['display'].splitlines()):
+            size=21 if len(display)<220 else 17
+            for n,line in enumerate(display.splitlines()):
                 p=box.text_frame.paragraphs[0] if n==0 else box.text_frame.add_paragraph()
-                p.space_after=Pt(18)
+                p.space_after=Pt(12)
                 add_rich_text(p,line,size,'243E36')
+            if diagram:
+                raw=base64.b64decode(diagram['png'].split(',',1)[1])
+                slide.shapes.add_picture(io.BytesIO(raw),Inches(5.7),Inches(2.45),width=Inches(6.9),height=Inches(3.45))
+                box=slide.shapes.add_textbox(Inches(5.8),Inches(6),Inches(6.6),Inches(.65))
+                box.text_frame.word_wrap=True
+                add_rich_text(box.text_frame.paragraphs[0],diagram['caption'],12,'557962')
+            if has_images:
+                from PIL import Image
+                images=manifest['question']['images'];cols=min(4,len(images));rows=(len(images)+cols-1)//cols
+                for n,value in enumerate(images):
+                    raw=base64.b64decode(value.split(',',1)[1])
+                    with Image.open(io.BytesIO(raw)) as im:width,height=im.size
+                    factor=min(11.4/cols/width,2.3/rows/height)
+                    slide.shapes.add_picture(io.BytesIO(raw),Inches(.8+(n%cols)*11.7/cols),Inches(4.4+(n//cols)*2.4/rows),
+                                             width=Inches(width*factor),height=Inches(height*factor))
         slide.notes_slide.notes_text_frame.text=page['narration']
     prs.save(path)
 
 
 def write_package(directory, manifest, slides):
     directory.mkdir(parents=True, exist_ok=True)
+    for slide in slides:
+        if slide.get('diagram'):
+            assets=directory/'figures';assets.mkdir(exist_ok=True)
+            for kind in ('svg','png'):
+                (assets/(slide['id']+'.'+kind)).write_bytes(base64.b64decode(slide['diagram'][kind].split(',',1)[1]))
     (directory/'index.html').write_text(html_package(manifest, slides), encoding='utf-8')
     (directory/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
     (directory/'slides.json').write_text(json.dumps(slides, ensure_ascii=False, indent=2), encoding='utf-8')

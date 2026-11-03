@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import weakref
+import wave
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,7 +16,7 @@ from .exam import Exam
 from .exporters import make_slides, write_package
 from .kb import KnowledgeBase
 from .models import GenerationOptions, Question, Resource
-from .providers import GenerationError, Qwen
+from .providers import GenerationError, Qwen, merge_wav
 from .samples import get_sample
 from .store import digest, dump, now
 
@@ -138,27 +139,71 @@ class Engine:
                         lambda stage,value:self.store.progress(item['id'],stage,value))
                 saved=dict(fingerprint=fingerprint,lesson=lesson,review=review,package_id=uuid4().hex)
                 atomic_json(checkpoint,saved)
-            lesson=saved['lesson']
-            slides=make_slides(question.model_dump(),lesson)
             directory=self.cfg.data_dir/'packages'/saved['package_id']
             directory.mkdir(parents=True,exist_ok=True)
             voice_mode=self.cfg.tts_mode if options.voice else 'none'
             if options.mode=='sample' and voice_mode=='qwen':
                 voice_mode='browser'
-            if voice_mode=='qwen':
-                for index,slide in enumerate(slides):
-                    self.store.progress(item['id'],f'合成语音 · {index+1}/{len(slides)}',78+int(index/len(slides)*12))
-                    audio_path=directory/'audio'/(slide['id']+'.wav')
-                    if not audio_path.exists():
-                        audio=await self.qwen.speech(slide['narration'])
-                        audio_path.parent.mkdir(exist_ok=True)
-                        audio_path.write_bytes(audio)
-                    slide['audio_file']='audio/'+audio_path.name
-                    slide['audio']='data:audio/wav;base64,'+base64.b64encode(audio_path.read_bytes()).decode('ascii')
+            for timing_attempt in range(3):
+                lesson=saved['lesson']
+                slides=make_slides(question.model_dump(),lesson)
+                if voice_mode=='qwen':
+                    for index,slide in enumerate(slides):
+                        self.store.progress(item['id'],f'合成语音 · {index+1}/{len(slides)}',78+int(index/len(slides)*12))
+                        # Changing a script must never reuse the previous page's audio.
+                        speech_identity=dict(text=slide['narration'],segments=[s['narration'] for s in slide.get('flow',[])])
+                        audio_path=directory/'audio'/(slide['id']+'-'+digest(speech_identity)[:12]+'.wav')
+                        if slide.get('flow'):
+                            fragments=[];cues=[];elapsed=0
+                            speech_dir=checkpoint.parent/'speech';speech_dir.mkdir(exist_ok=True)
+                            for node,step in enumerate(slide['flow']):
+                                clip=speech_dir/(digest(dict(text=step['narration'],identity=self.cfg.generation_identity()))+'.wav')
+                                if not clip.exists():
+                                    clip.write_bytes(await self.qwen.speech(step['narration']))
+                                with wave.open(str(clip),'rb') as wav:
+                                    seconds=wav.getnframes()/wav.getframerate()
+                                cues.append(dict(node=node,start_seconds=round(elapsed,3),end_seconds=round(elapsed+seconds,3)))
+                                elapsed+=seconds;fragments.append(clip.read_bytes())
+                            slide['cues']=cues
+                            if not audio_path.exists():
+                                audio_path.parent.mkdir(exist_ok=True)
+                                audio_path.write_bytes(merge_wav(fragments))
+                        elif not audio_path.exists():
+                            audio=await self.qwen.speech(slide['narration'])
+                            audio_path.parent.mkdir(exist_ok=True)
+                            audio_path.write_bytes(audio)
+                        with wave.open(str(audio_path),'rb') as wav:
+                            slide['duration_seconds']=round(wav.getnframes()/wav.getframerate(),2)
+                        slide['audio_file']='audio/'+audio_path.name
+                        slide['audio']='data:audio/wav;base64,'+base64.b64encode(audio_path.read_bytes()).decode('ascii')
+                duration=sum(s.get('duration_seconds',0) for s in slides)
+                if voice_mode!='qwen' or lesson.get('complexity')!='simple' or duration<=120:
+                    break
+                if timing_attempt==2:
+                    raise GenerationError('lecture_too_long',f'简单题语音仍为 {duration:.0f} 秒，超过两分钟；已保留检查点，未发布超长课件。')
+                self.store.progress(item['id'],'精简讲稿并重新复核 · 控制在两分钟内',72)
+                target=max(160,int(sum(len(p['narration']) for p in lesson['pages'])*100/duration))
+                revised,review=await self.qwen.lesson(question,context['resources'],options,
+                    lambda stage,value:self.store.progress(item['id'],stage,value),
+                    feedback=f'此题必须保持 simple。上一版实际语音 {duration:.0f} 秒超过120秒。台词总计压缩到 {target} 字符以内，保留推理、图文对应和完整阅读区。')
+                if revised.get('complexity')!='simple':
+                    raise GenerationError('lecture_complexity_changed','精简讲稿时错误改变题目复杂度，未发布结果。')
+                saved.update(lesson=revised,review=review)
+                atomic_json(checkpoint,saved)
+            # Include only the final script's audio in the downloadable package.
+            used_audio={s.get('audio_file') for s in slides}
+            for old in (directory/'audio').glob('*.wav'):
+                if 'audio/'+old.name not in used_audio:
+                    old.unlink()
             self.store.progress(item['id'],'装配 HTML、PPTX 与讲解包',92)
-            manifest=dict(schema_version='1.0',package_id=saved['package_id'],fingerprint=fingerprint,
+            manifest=dict(schema_version='1.1',package_id=saved['package_id'],fingerprint=fingerprint,
                 created_at=now(),question=question.model_dump(),title=lesson['title'],objective=lesson['objective'],
                 slide_count=len(slides),mode=options.mode,review=saved['review'],voice_mode=voice_mode,
+                reading={key:lesson[key] for key in ('knowledge_points','solution_steps','answer','pitfalls','summary')},
+                quality=dict(complexity=lesson.get('complexity','sample'),page_limit=5 if lesson.get('complexity')=='simple' else 10,
+                    page_count=len(slides),diagram_count=sum(bool(s.get('diagram')) for s in slides),
+                    audio_duration_seconds=round(duration,2) if voice_mode=='qwen' else None,
+                    duration_limit_seconds=120 if lesson.get('complexity')=='simple' else None),
                 resources=[{k:v for k,v in r.items() if k not in {'content','answer','analysis'}} for r in context['resources']],
                 variants=lesson['variants'],files=['index.html','courseware.pptx','slides.json','narration.json','manifest.json','package.zip'])
             if self.cfg.s3_bucket:

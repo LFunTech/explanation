@@ -56,6 +56,6 @@ class Settings(BaseSettings):
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
     def generation_identity(self):
-        return dict(pipeline='direct-question-v3', model=self.qwen_model,
+        return dict(pipeline='illustrated-flow-v5', model=self.qwen_model,
                     vision_model=self.qwen_vision_model, endpoint=self.qwen_base_url,
                     tts_mode=self.tts_mode, tts_model=self.qwen_tts_model, voice=self.qwen_tts_voice)
