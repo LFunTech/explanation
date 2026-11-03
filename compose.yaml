@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: explanation-pgvector
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: explanation
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env}
+      POSTGRES_DB: explanation
+    ports:
+      - "127.0.0.1:55440:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U explanation -d explanation"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+volumes:
+  pgdata:
