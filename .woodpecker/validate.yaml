@@ -11,10 +11,11 @@ steps:
     environment:
       DATA_DIR: /tmp/explanation-tests
       PYTHONUTF8: "1"
+      PYTHONUNBUFFERED: "1"
     commands:
       - apt-get update && apt-get install -y --no-install-recommends fonts-noto-cjk
       - pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements-dev.txt
-      - python -m pytest -q
+      - python -m pytest -vv --durations=10 -o faulthandler_timeout=120
   - name: chart
     image: docker-hub.f123.pub/base/alpine:3.22.1
     commands:
