@@ -3,6 +3,7 @@ FROM ${PYTHON_IMAGE}
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends fonts-noto-cjk ca-certificates tzdata && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt ./
+ARG PIP_INDEX_URL=https://pypi.org/simple/
 RUN pip install --no-cache-dir -r requirements.txt && useradd -u 10001 -m app && mkdir /data && chown app:app /data
 COPY app ./app
 COPY web ./web

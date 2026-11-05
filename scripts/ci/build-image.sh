@@ -18,5 +18,6 @@ unset AUTH DOCKER_PASSWORD
   --destination="$IMAGE_REPO:$CI_COMMIT_TAG-amd64" \
   --custom-platform=linux/amd64 \
   --build-arg=PYTHON_IMAGE=docker-hub.f123.pub/base/python:3.11-slim \
+  --build-arg=PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
   --label="org.opencontainers.image.revision=${CI_COMMIT_SHA:-unknown}" \
   --cache=true --cache-repo="$IMAGE_REPO-cache-amd64"
