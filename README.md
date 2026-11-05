@@ -4,7 +4,7 @@
 
 ## 启动
 
-需要 Python 3.12。前端是原生 ES modules，数学渲染资源已随仓库保存，无需 Node.js 构建，也不依赖 CDN。
+支持 Python 3.11 / 3.12。前端是原生 ES modules，数学渲染资源已随仓库保存，无需 Node.js 构建，也不依赖 CDN。CI 使用团队镜像库已有的 Python 3.11，开发环境可继续使用 3.12。
 
 ```powershell
 cd C:\Users\TMACY\lfun-github\explanation

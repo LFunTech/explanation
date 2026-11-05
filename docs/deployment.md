@@ -8,7 +8,7 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| `Dockerfile` / `.dockerignore` | Python 3.12、中文字体、非 root 运行；排除密钥、数据、备份与测试产物 |
+| `Dockerfile` / `.dockerignore` | Python、中文字体、非 root 运行；排除密钥、数据、备份与测试产物 |
 | `.woodpecker/validate.yaml` | 普通 push、PR、tag、manual 执行测试及 Helm 检查 |
 | `.woodpecker/build.yaml` | 发布标签通过验证后构建 AMD64 镜像 |
 | `.woodpecker/deploy-test.yaml` | `test-vX.Y.Z` 发布到 `explanation-test` 命名空间 |
@@ -18,7 +18,7 @@
 | `deploy/compose.yaml` | 独立服务器部署；根目录 Compose 仅提供可选知识库 |
 | `scripts/ci/` | 镜像构建、配置校验、集群认证、发布及 Chart 验证 |
 
-镜像仓库为 `docker-hub.f123.pub/lfun/explanation`，每次发布写入版本标签及对应 `-amd64` 标签，不依赖 `latest`。
+镜像仓库为 `docker-hub.f123.pub/lfun/explanation`，每次发布写入版本标签及对应 `-amd64` 标签，不依赖 `latest`。CI 验证与镜像构建使用参考项目已采用的 `docker-hub.f123.pub/base/python:3.11-slim`，避免构建节点无法直连 Docker Hub；本地 Docker 默认使用 Python 3.12，也可用 `PYTHON_IMAGE` 构建参数覆盖。
 
 任务与课件元数据保存在 `/data/app.sqlite3`，生成产物、缓存及恢复检查点也在 `/data`。应用固定 **一个 Uvicorn worker、一个 Pod**，更新策略为 **Recreate**，允许短暂不可用。`WORKER_CONCURRENCY` 是这个进程内部的异步任务数，不能用多个 Pod 替代。重启会从任务库恢复未完成工作。
 
