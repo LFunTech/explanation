@@ -1,0 +1,43 @@
+{
+  "curriculum_version": "",
+  "school_system": "",
+  "publisher": "",
+  "textbook_version": "",
+  "volume": "",
+  "question_id": "exam:public:8f08920a-e24d-4d58-9139-aff65f871bca",
+  "stem": "笼子里有若干只鸡和兔．从上面数，有 35 个头；从下面数，有 94 只脚．鸡有 ____ 只，兔有 ____ 只．",
+  "subject": "数学",
+  "grade": "七年级",
+  "grades": [
+    "七年级"
+  ],
+  "source_grades": [
+    "七年级"
+  ],
+  "region": "上海",
+  "knowledge_points": [
+    "鸡兔同笼"
+  ],
+  "knowledge_point_ids": [
+    "f125106f-ef09-4246-b004-3e4283bc1ec5"
+  ],
+  "target_grade": "",
+  "target_semester": "全学期",
+  "target_curriculum": [],
+  "source": "exam/public/question/8f08920a-e24d-4d58-9139-aff65f871bca",
+  "requires_images": false,
+  "question_type": "填空题",
+  "difficulty": "基础",
+  "options": [],
+  "images": [],
+  "sub_questions": [
+    {
+      "id": "1",
+      "stem": "请结合共用题干作答。",
+      "answer": "①. 23 ②. 12",
+      "analysis": "【分析】\n本题考查了“鸡兔同笼”的求解．可以用一元一次方程的方法进行求解．\n【详解】\n解：设鸡有 x 只，则兔有（ $35-x$ ）只，\n根据题意得 $2x+4(35-x)=94$ ，\n解得 $x=23$ ，\n故答案为： 23 ， 12 ．"
+    }
+  ],
+  "answer": "①. 23 ②. 12",
+  "analysis": "【分析】\n本题考查了“鸡兔同笼”的求解．可以用一元一次方程的方法进行求解．\n【详解】\n解：设鸡有 x 只，则兔有（ $35-x$ ）只，\n根据题意得 $2x+4(35-x)=94$ ，\n解得 $x=23$ ，\n故答案为： 23 ， 12 ．"
+}

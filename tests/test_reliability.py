@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.diagrams import NumberLine, Geometry, render_diagram
+from app.diagrams import NumberLine, Geometry, Process, render_diagram
 from app.models import Question,GenerationOptions,Review
 from app.providers import Qwen,GenerationError,post_with_retry
 from app.scope import scope_matches,validate_document_metadata
@@ -20,6 +20,20 @@ def test_missing_ticks_added_without_changing_interval():
     value['intervals'][0]['end']=-2
     with pytest.raises(ValidationError,match='start='):
         NumberLine.model_validate(value)
+    value=number_line();value['intervals']=[dict(start=-1,end=-1,start_closed=True,end_closed=True,label='单点')]
+    assert NumberLine.model_validate(value).intervals[0].end==-1
+    value['intervals'][0]['end_closed']=False
+    with pytest.raises(ValidationError):NumberLine.model_validate(value)
+    value=number_line();value['minimum']=-1;value['ticks']=[-1,0,3]
+    result=NumberLine.model_validate(value)
+    assert result.minimum < -1 and result.intervals[0].start==-1
+
+
+def test_process_formula_label_is_preserved_and_fits():
+    label='由直角得 ∠DBC = 90°−47° = 43°'
+    diagram=Process(kind='process',caption='解题逻辑',alt='由直角关系计算方向角。',nodes=['方向角',label])
+    assert diagram.nodes[1]==label
+    assert render_diagram(diagram.model_dump())['svg'].startswith('data:image/svg+xml;base64,')
 
 
 def test_negative_geometry_keeps_angles_and_circles_in_canvas():
@@ -63,7 +77,7 @@ async def noop():pass
 @pytest.mark.asyncio
 async def test_review_timeout_resumes_saved_candidate(tmp_path):
     from app.models import IllustratedLesson
-    qwen=Qwen(Settings(_env_file=None));calls=[]
+    qwen=Qwen(Settings(_env_file=None,qwen_independent_review=True));calls=[]
     draft=lesson();saved=tmp_path/'draft.json'
     async def fake(instruction,data,schema,images=(),progress=None):
         calls.append(schema)
@@ -85,6 +99,9 @@ async def test_review_timeout_resumes_saved_candidate(tmp_path):
 
 
 def test_curriculum_and_textbook_scope_are_separate():
+    from app.kb import phase_for
+    assert phase_for('六年级','上海','五四制')=='junior'
+    assert phase_for('六年级','上海','六三制')=='primary'
     textbook=dict(title='教材',subject='数学',source='授权资料',source_type='textbook',version='2024',grades=['六年级'],
         school_system='五四制',publisher='上海教育出版社',textbook_version='2024修订',volume='上册',curriculum_version='2022')
     meta=validate_document_metadata(textbook)

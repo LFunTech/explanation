@@ -8,6 +8,7 @@ import shutil
 import time
 import weakref
 import wave
+import zipfile
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,12 +16,12 @@ import httpx
 
 from .exam import Exam
 from .exporters import PRESENTATION_VERSION, make_slides, write_package
-from .kb import KnowledgeBase
 from .models import GenerationOptions, Question, Resource
 from .providers import GenerationError, Qwen, merge_wav
 from .samples import get_sample
 from .store import digest, dump, now
-from .scope import SCOPE_FIELDS, scope_matches, generation_question
+from .scope import scope_matches, generation_question
+from .teaching import teaching_question, teaching_target, package_prefix
 
 log=logging.getLogger(__name__)
 
@@ -42,7 +43,28 @@ def package_links(cfg,package_id):
         expires=int(time.time())+86400*7
         suffix=f'?expires={expires}&token={signed_token(cfg,package_id,expires)}'
     base=cfg.public_base_url.rstrip('/')+'/packages/'+package_id+'/'
-    return {key:base+name+suffix for key,name in [('html_url','index.html'),('pptx_url','courseware.pptx'),('zip_url','package.zip'),('manifest_url','manifest.json')]}
+    links={**{key:base+name+suffix for key,name in [('html_url','index.html'),('content_url','online.html'),('package_player_url','player.html'),('pptx_url','courseware.pptx'),('zip_url','package.zip'),('manifest_url','manifest.json')]},
+           'player_url':cfg.public_base_url.rstrip('/')+'/player/'+package_id+suffix,
+           'embed_config_url':cfg.public_base_url.rstrip('/')+'/embed/'+package_id+'/config'+suffix,
+           'microapp_data_url':cfg.public_base_url.rstrip('/')+'/microapp/'+package_id+'/data'+suffix}
+    if cfg.s3_bucket:
+        links['minio_player_url']=cfg.public_base_url.rstrip('/')+'/minio-player/'+package_id+suffix
+        links['minio_package_player_url']=cfg.public_base_url.rstrip('/')+'/minio-package/'+package_id+'/player'+suffix
+    return links
+
+
+def retryable_storage_error(error):
+    from botocore.exceptions import ClientError,HTTPClientError,ConnectionError
+    seen=set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error,(HTTPClientError,ConnectionError)):
+            return True
+        if isinstance(error,ClientError):
+            response=error.response
+            return response.get('ResponseMetadata',{}).get('HTTPStatusCode') in {408,429,500,502,503,504} or response.get('Error',{}).get('Code') in {'RequestTimeout','SlowDown','InternalError','ServiceUnavailable'}
+        error=error.__cause__ or error.__context__
+    return False
 
 
 class Engine:
@@ -81,14 +103,13 @@ class Engine:
             except Exception as error:
                 # 不把上游响应、连接串或凭证放入公开错误。
                 log.error('generation_failed item=%s type=%s',item['id'],type(error).__name__)
-                self.store.finish(item['id'],error=dict(code='generation_failed',message='生成未完成，请检查服务配置后重试；已通过复核的内容会从检查点恢复。'))
+                self.store.finish(item['id'],error=dict(code='generation_failed',message='生成未完成，请检查服务配置后重试；已保存的内容会从检查点恢复。'))
 
     async def resources(self,question,options):
+        question=teaching_question(question)
+        # Local curriculum is selected/analyzed before submission. Generation
+        # uses the submitted teaching target without another local lookup.
         resources=[]
-        for row in self.store.resources():
-            if row['subject']==question.subject and question.grade in row['grades'] and row['region'] in {question.region,'全国'} and scope_matches(row,question.model_dump(),row.get('source_type',row['kind'])):
-                if any(k in question.stem or k in question.knowledge_points for k in row['knowledge_points']):
-                    resources.append(row)
         if self.cfg.knowledge_api_url:
             async with httpx.AsyncClient(timeout=30,trust_env=False) as client:
                 response=await client.post(self.cfg.knowledge_api_url,json=dict(question=question.model_dump(),limit=8),
@@ -96,21 +117,8 @@ class Engine:
                 response.raise_for_status()
                 for raw in response.json()['resources']:
                     row=Resource.model_validate(raw).model_dump()
-                    if row['subject']==question.subject and question.grade in row['grades'] and row['region'] in {question.region,'全国'} and scope_matches(row,question.model_dump(),row.get('source_type',row['kind'])):
+                    if row['subject']==question.subject and set(question.grades).intersection(row['grades']) and row['region'] in {question.region,'全国'} and scope_matches(row,question.model_dump(),row.get('source_type',row['kind'])):
                         resources.append(row)
-        if self.cfg.vector_database_url:
-            kb=KnowledgeBase(self.cfg)
-            stats=await asyncio.to_thread(kb.stats)
-            if any(r['embedded'] and r['source_type']!='graph' for r in stats['by_source']):
-                hits=await kb.search(question.stem+' '+' '.join(question.knowledge_points),question.subject,question.grade,question.region,scope=question.model_dump())
-                for hit in hits:
-                    meta=hit['metadata']
-                    resources.append(dict(id=hit['id'],title=meta['title'],kind='curriculum' if hit['source_type']=='curriculum' else 'knowledge',
-                        subject=question.subject,grades=hit['grades'],region=meta.get('region','全国'),content=hit['content'],
-                        knowledge_points=hit['labels'],source=meta.get('source','本地知识库'),version=meta.get('version','1'),
-                        page=meta.get('page'),match_scope=hit['match_scope'],score=hit['score'],is_sample=False,
-                        extraction=meta.get('extraction','text'),review_status=meta.get('review_status','provided'),
-                        **{k:meta.get(k,'') for k in SCOPE_FIELDS}))
         if self.cfg.exam_db_host and options.variant_count:
             resources+=await asyncio.to_thread(Exam(self.cfg).variants,question,options.variant_count)
         return sorted(resources,key=lambda r:r.get('is_sample',False))[:16]
@@ -118,48 +126,75 @@ class Engine:
     async def generate(self,item):
         job=self.store.job(item['job_id'])
         question=Question.model_validate(json.loads(item['question_json']))
+        if not question.target_grade:
+            raise GenerationError('teaching_target_missing','请先填写目标年级，再重新生成课件；原题年级不会自动作为教学目标。')
         options=GenerationOptions.model_validate(job['request']['options'])
+        from .teaching import validate_target_curriculum
+        try:validate_target_curriculum(question)
+        except ValueError as error:raise GenerationError('teaching_target_grade',str(error)) from None
         context=json.loads(item['context_json']) if item['context_json'] else None
-        context_version=3 if any(getattr(question,k) for k in SCOPE_FIELDS) else 2
-        if context is None or context.get('version')!=context_version:
+        context_version=5  # Discard older snapshots containing local curriculum.
+        context_key=digest(generation_question(question))
+        if context is None or context.get('version')!=context_version or context.get('question_key')!=context_key:
             resources=[] if options.mode=='sample' else await self.resources(question,options)
-            context=dict(version=context_version,resources=resources)
+            context=dict(version=context_version,question_key=context_key,resources=resources)
             self.store.context(item['id'],context)
         fingerprint=digest(dict(question=generation_question(question),options=options.model_dump(exclude={'force'}),
             resources=context['resources'],identity=self.cfg.generation_identity()))
-        lock=self.locks.setdefault(fingerprint,asyncio.Lock())
+        lock_key=('courseware',item['id']) if options.force else ('cache',fingerprint)
+        lock=self.locks.setdefault(lock_key,asyncio.Lock())
         async with lock:
             previous=self.store.find_package(fingerprint)
             if previous and not options.force and (self.cfg.data_dir/'packages'/previous['package_id']/'index.html').exists():
                 if previous.get('presentation',{}).get('version')!=PRESENTATION_VERSION:
                     self.store.progress(item['id'],'更新课件排版',90)
-                    previous=await asyncio.to_thread(self.restyle,previous)
+                    previous=await asyncio.to_thread(self.restyle,previous,publish=False)
+                if self.cfg.s3_bucket:
+                    prefix=package_prefix(self.cfg,question.model_dump(),previous['package_id'])
+                    storage=dict(bucket=self.cfg.s3_bucket,prefix=prefix)
+                    if previous.get('storage')!=storage:
+                        self.store.progress(item['id'],'保存到对象存储',97)
+                        await self.publish(self.cfg.data_dir/'packages'/previous['package_id'],prefix,item['id'])
+                        self.store.record_storage(previous['package_id'],storage)
                 self.store.finish(item['id'],package_id=previous['package_id'],reused=True)
                 return
             checkpoint=self.cfg.data_dir/'work'/item['id']/'checkpoint.json'
+            if item.get('generation',0):
+                checkpoint=checkpoint.parent/'runs'/str(item['generation'])/'checkpoint.json'
             saved=json.loads(checkpoint.read_text(encoding='utf-8')) if checkpoint.exists() else None
             if not saved or saved.get('fingerprint')!=fingerprint:
                 if options.mode=='sample':
                     lesson=get_sample(question)
-                    if options.variant_count>len(lesson['variants']):
-                        raise GenerationError('sample_variants','内置样例最多包含两道变式题。')
                     lesson['variants']=lesson['variants'][:options.variant_count]
                     review=dict(type='curated_sample',passed=True,note='内置人工编写样例，未调用模型复核')
                 else:
-                    lesson,review=await self.qwen.lesson(question,context['resources'],options,
+                    lesson,review=await self.qwen.lesson(teaching_question(question),context['resources'],options,
                         lambda stage,value:self.store.progress(item['id'],stage,value),checkpoint=checkpoint.with_name('draft.json'))
                 saved=dict(fingerprint=fingerprint,lesson=lesson,review=review,package_id=uuid4().hex)
                 atomic_json(checkpoint,saved)
             directory=self.cfg.data_dir/'packages'/saved['package_id']
             directory.mkdir(parents=True,exist_ok=True)
+            # A closed ZIP is the export checkpoint. Storage retries and service
+            # restarts must not repeat model generation or speech synthesis.
+            ready=directory/'manifest.json'
+            if ready.exists() and zipfile.is_zipfile(directory/'package.zip'):
+                manifest=json.loads(ready.read_text(encoding='utf-8'))
+                if manifest.get('fingerprint')==fingerprint and all((directory/name).is_file() for name in manifest['files']):
+                    if manifest.get('presentation',{}).get('version')!=PRESENTATION_VERSION:
+                        manifest['presentation']=dict(version=PRESENTATION_VERSION)
+                        slides=json.loads((directory/'slides.json').read_text(encoding='utf-8'))
+                        await asyncio.to_thread(write_package,directory,manifest,slides)
+                    await self.complete_package(item,directory,manifest)
+                    return
             voice_mode=self.cfg.tts_mode if options.voice else 'none'
             if options.mode=='sample' and voice_mode=='qwen':
                 voice_mode='browser'
-            for timing_attempt in range(3):
-                lesson=saved['lesson']
-                slides=make_slides(question.model_dump(),lesson)
-                if voice_mode=='qwen':
+            lesson=saved['lesson']
+            slides=make_slides(teaching_question(question).model_dump(),lesson)
+            if voice_mode=='qwen':
+                try:
                     for index,slide in enumerate(slides):
+                        if not slide['narration'].strip():continue
                         self.store.progress(item['id'],f'合成语音 · {index+1}/{len(slides)}',78+int(index/len(slides)*12))
                         # Changing a script must never reuse the previous page's audio.
                         speech_identity=dict(text=slide['narration'],segments=[s['narration'] for s in slide.get('flow',[])])
@@ -168,6 +203,7 @@ class Engine:
                             fragments=[];cues=[];elapsed=0
                             speech_dir=checkpoint.parent/'speech';speech_dir.mkdir(exist_ok=True)
                             for node,step in enumerate(slide['flow']):
+                                if not step['narration'].strip():continue
                                 clip=speech_dir/(digest(dict(text=step['narration'],identity=self.cfg.generation_identity()))+'.wav')
                                 if not clip.exists():
                                     clip.write_bytes(await self.qwen.speech(step['narration']))
@@ -187,20 +223,10 @@ class Engine:
                             slide['duration_seconds']=round(wav.getnframes()/wav.getframerate(),2)
                         slide['audio_file']='audio/'+audio_path.name
                         slide['audio']='data:audio/wav;base64,'+base64.b64encode(audio_path.read_bytes()).decode('ascii')
-                duration=sum(s.get('duration_seconds',0) for s in slides)
-                if voice_mode!='qwen' or lesson.get('complexity')!='simple' or duration<=120:
-                    break
-                if timing_attempt==2:
-                    raise GenerationError('lecture_too_long',f'简单题语音仍为 {duration:.0f} 秒，超过两分钟；已保留检查点，未发布超长课件。')
-                self.store.progress(item['id'],'精简讲稿并重新复核 · 控制在两分钟内',72)
-                target=max(160,int(sum(len(p['narration']) for p in lesson['pages'])*100/duration))
-                revised,review=await self.qwen.lesson(question,context['resources'],options,
-                    lambda stage,value:self.store.progress(item['id'],stage,value),
-                    feedback=f'此题必须保持 simple。上一版实际语音 {duration:.0f} 秒超过120秒。台词总计压缩到 {target} 字符以内，保留推理、图文对应和完整阅读区。',checkpoint=checkpoint.with_name('draft.json'))
-                if revised.get('complexity')!='simple':
-                    raise GenerationError('lecture_complexity_changed','精简讲稿时错误改变题目复杂度，未发布结果。')
-                saved.update(lesson=revised,review=review)
-                atomic_json(checkpoint,saved)
+                except (GenerationError,httpx.HTTPError,wave.Error):
+                    voice_mode='browser'
+                    self.store.progress(item['id'],'语音暂不可用，继续生成 PPT；课件使用设备朗读',90)
+            duration=sum(s.get('duration_seconds',0) for s in slides)
             # Include only the final script's audio in the downloadable package.
             used_audio={s.get('audio_file') for s in slides}
             for old in (directory/'audio').glob('*.wav'):
@@ -208,26 +234,35 @@ class Engine:
                     old.unlink()
             self.store.progress(item['id'],'装配 HTML、PPTX 与讲解包',92)
             manifest=dict(schema_version='1.1',package_id=saved['package_id'],fingerprint=fingerprint,
+                courseware_id=item['id'],generation_requirements=options.generation_requirements,
                 presentation=dict(version=PRESENTATION_VERSION),
                 created_at=now(),question=question.model_dump(),title=lesson['title'],objective=lesson['objective'],
+                teaching_target=teaching_target(question),
                 slide_count=len(slides),mode=options.mode,review=saved['review'],voice_mode=voice_mode,
                 reading={key:lesson[key] for key in ('knowledge_points','solution_steps','answer','pitfalls','summary')},
-                quality=dict(complexity=lesson.get('complexity','sample'),page_limit=5 if lesson.get('complexity')=='simple' else 10,
+                quality=dict(complexity=lesson.get('complexity','sample'),page_limit=None,
                     page_count=len(slides),diagram_count=sum(bool(s.get('diagram')) for s in slides),
                     audio_duration_seconds=round(duration,2) if voice_mode=='qwen' else None,
-                    duration_limit_seconds=120 if lesson.get('complexity')=='simple' else None),
+                    duration_limit_seconds=None),
                 resources=[{k:v for k,v in r.items() if k not in {'content','answer','analysis'}} for r in context['resources']],
                 variants=lesson['variants'],files=['index.html','courseware.pptx','slides.json','narration.json','manifest.json','package.zip'])
             if self.cfg.s3_bucket:
-                manifest['object_prefix']=self.cfg.s3_prefix.strip('/')+'/'+digest(question.question_id)[:16]+'/'+manifest['package_id']
+                manifest['object_prefix']=package_prefix(self.cfg,question.model_dump(),manifest['package_id'])
+                manifest['storage']=dict(bucket=self.cfg.s3_bucket,prefix=manifest['object_prefix'])
             await asyncio.to_thread(write_package,directory,manifest,slides)
-            if self.cfg.s3_bucket:
-                self.store.progress(item['id'],'保存到对象存储',97)
-                await asyncio.to_thread(self.upload,directory,manifest['object_prefix'])
-            self.store.save_package(manifest)
-            self.store.finish(item['id'],package_id=manifest['package_id'])
+            await self.complete_package(item,directory,manifest)
 
-    def restyle(self,previous):
+    async def complete_package(self,item,directory,manifest):
+        if self.cfg.s3_bucket:
+            prefix=package_prefix(self.cfg,manifest['question'],manifest['package_id'])
+            manifest.update(object_prefix=prefix,storage=dict(bucket=self.cfg.s3_bucket,prefix=prefix))
+            self.store.progress(item['id'],'课件已生成，正在上传 MinIO',97)
+            await self.publish(directory,prefix,item['id'])
+        if not self.store.package(manifest['package_id']):
+            self.store.save_package(manifest)
+        self.store.finish(item['id'],package_id=manifest['package_id'])
+
+    def restyle(self,previous,*,publish=True):
         """A new immutable presentation of the same reviewed content and audio."""
         source=self.cfg.data_dir/'packages'/previous['package_id']
         slides=json.loads((source/'slides.json').read_text(encoding='utf-8'))
@@ -237,25 +272,64 @@ class Engine:
         directory.mkdir(parents=True,exist_ok=True)
         if (source/'audio').is_dir():
             shutil.copytree(source/'audio',directory/'audio')
-        if self.cfg.s3_bucket:
-            manifest['object_prefix']=self.cfg.s3_prefix.strip('/')+'/'+digest(manifest['question']['question_id'])[:16]+'/'+manifest['package_id']
+        if self.cfg.s3_bucket and publish:
+            manifest['object_prefix']=package_prefix(self.cfg,manifest['question'],manifest['package_id'])
+            manifest['storage']=dict(bucket=self.cfg.s3_bucket,prefix=manifest['object_prefix'])
         else:
             manifest.pop('object_prefix',None)
+            manifest.pop('storage',None)
         write_package(directory,manifest,slides)
-        if self.cfg.s3_bucket:
+        if self.cfg.s3_bucket and publish:
             self.upload(directory,manifest['object_prefix'])
         self.store.save_package(manifest)
         return manifest
 
     def upload(self,directory,prefix):
         import boto3
+        from boto3.s3.transfer import TransferConfig
+        from botocore.config import Config
+        from botocore.exceptions import ClientError
         client=boto3.client('s3',endpoint_url=self.cfg.s3_endpoint_url or None,region_name=self.cfg.s3_region,
-            aws_access_key_id=self.cfg.s3_access_key_id,aws_secret_access_key=self.cfg.s3_secret_access_key)
+            aws_access_key_id=self.cfg.s3_access_key_id,aws_secret_access_key=self.cfg.s3_secret_access_key,
+            config=Config(signature_version='s3v4',s3={'addressing_style':'path'},
+                connect_timeout=15,read_timeout=120,retries={'mode':'standard','max_attempts':2},proxies={}))
+        chunk_size=8*1024*1024
+        transfer=TransferConfig(max_concurrency=2,multipart_threshold=chunk_size,multipart_chunksize=chunk_size)
         import mimetypes
-        for path in directory.rglob('*'):
-            if path.is_file():
-                client.upload_file(str(path),self.cfg.s3_bucket,prefix+'/'+path.relative_to(directory).as_posix(),
-                    ExtraArgs={'ContentType':mimetypes.guess_type(path.name)[0] or 'application/octet-stream'})
+        # Upload manifest last, so its presence marks a complete folder.
+        files=sorted((p for p in directory.rglob('*') if p.is_file() and not any(part.startswith('.') for part in p.relative_to(directory).parts)),
+            key=lambda p:(p.name=='manifest.json',p.as_posix()))
+        for path in files:
+            key=prefix+'/'+path.relative_to(directory).as_posix()
+            sha256=hashlib.sha256();md5=hashlib.md5();parts=[]
+            with path.open('rb') as source:
+                while chunk:=source.read(chunk_size):
+                    sha256.update(chunk);md5.update(chunk);parts.append(hashlib.md5(chunk).digest())
+            checksum=sha256.hexdigest()
+            etag=(hashlib.md5(b''.join(parts)).hexdigest()+'-'+str(len(parts))) if path.stat().st_size>=chunk_size else md5.hexdigest()
+            try:
+                remote=client.head_object(Bucket=self.cfg.s3_bucket,Key=key)
+                if remote.get('Metadata',{}).get('sha256')==checksum or remote.get('ETag','').strip('"')==etag:
+                    continue
+            except ClientError as error:
+                if error.response.get('ResponseMetadata',{}).get('HTTPStatusCode')!=404 and error.response.get('Error',{}).get('Code') not in {'404','NoSuchKey','NotFound'}:
+                    raise
+            client.upload_file(str(path),self.cfg.s3_bucket,key,Config=transfer,
+                ExtraArgs={'ContentType':mimetypes.guess_type(path.name)[0] or 'application/octet-stream','Metadata':{'sha256':checksum}})
+
+    async def publish(self,directory,prefix,item_id=None):
+        attempt=0
+        while True:
+            try:
+                await asyncio.to_thread(self.upload,directory,prefix)
+                return
+            except Exception as error:
+                if not retryable_storage_error(error):
+                    raise
+                delay=min(30,2**min(attempt,5));attempt+=1
+                if item_id:
+                    self.store.progress(item_id,f'MinIO 连接暂不可用，{delay} 秒后继续上传 · 第 {attempt} 次',97)
+                await asyncio.sleep(delay)
 
     async def callbacks(self):
         while True:

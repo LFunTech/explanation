@@ -1,0 +1,26 @@
+workspace:
+  base: /woodpecker
+  path: src
+labels:
+  platform: linux/amd64
+when:
+  - event: tag
+    evaluate: 'CI_COMMIT_TAG matches "^prod-v[0-9]+[.][0-9]+[.][0-9]+$"'
+depends_on:
+  - build
+steps:
+  - name: deploy
+    image: docker-hub.f123.pub/base/alpine:3.22.1
+    environment:
+      DEPLOY_ENV: prod
+      APP_CONFIG:
+        from_secret: prod_config
+      KUBECONFIG_DATA:
+        from_secret: kubeconfig_prod
+      DOCKER_USERNAME:
+        from_secret: DOCKER_USERNAME
+      DOCKER_PASSWORD:
+        from_secret: DOCKER_PASSWORD
+    commands:
+      - sh scripts/ci/install-tools.sh
+      - sh scripts/ci/deploy.sh

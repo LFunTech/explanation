@@ -1,5 +1,5 @@
 .git
-.env
+.env*
 .venv
 .tmp
 .playwright-cli
@@ -8,3 +8,13 @@ output
 __pycache__
 .pytest_cache
 **/__pycache__
+backups
+tests
+.woodpecker
+.github
+.agents
+.codex
+.aws
+deploy
+docs
+*.log

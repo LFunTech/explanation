@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>课件引用示例</title>
+<style>
+:root{font-family:system-ui,"Microsoft YaHei",sans-serif;color:#203e34;background:#fff}*{box-sizing:border-box}body{margin:0;height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr) auto}header,footer{padding:.75rem 1rem;display:flex;align-items:center;gap:.75rem;border-bottom:1px solid #dce4dd}header strong{flex:1}button,select{font:inherit;border:1px solid #cddbd1;border-radius:.4rem;background:#fff;color:inherit;padding:.5rem .75rem}button:disabled{opacity:.45}main{display:flex;align-items:center;justify-content:center;min-height:0;padding:1rem}iframe{border:1px solid #dce4dd;box-shadow:0 .3rem 1rem #193d2912;background:#fff;max-width:100%;max-height:100%}footer{border:0;border-top:1px solid #dce4dd;justify-content:center;flex-wrap:wrap}select{max-width:40vw}#status{font-size:.85rem}dialog{max-width:40rem;width:90%;border:1px solid #dce4dd;border-radius:.5rem}#notes{white-space:pre-wrap;line-height:1.7}
+</style></head><body>
+<header><strong id="title">课件引用示例</strong><span id="status" role="status">正在加载…</span><button id="notes-button" disabled>讲稿</button><button id="print" disabled>打印</button></header>
+<main><iframe id="lesson" title="课件内容" sandbox="allow-scripts allow-downloads allow-modals" allow="autoplay"></iframe></main>
+<footer><button id="prev" disabled>← 上一页</button><span id="page"></span><select id="outline" aria-label="课件目录" disabled></select><button id="play" disabled>▶ 播放讲解</button><label><input id="auto" type="checkbox"> 连续播放</label><button id="next" disabled>下一页 →</button></footer>
+<dialog id="notes-dialog"><form method="dialog"><button>关闭</button></form><p id="notes"></p></dialog>
+<script src="courseware-sdk.js"></script><script>
+const $=id=>document.getElementById(id),frame=$('lesson');
+const player=new CoursewareSDK.Player(frame);let lastConfig;
+function fit(){const r=frame.parentElement.getBoundingClientRect(),width=Math.max(0,Math.min(r.width-32,(r.height-32)*16/9));frame.style.width=width+'px';frame.style.height=width*9/16+'px';}
+new ResizeObserver(fit).observe(frame.parentElement);
+player.on('ready',data=>{
+ $('title').textContent=data.title;$('status').textContent='';
+ $('outline').replaceChildren(...data.state.outline.map(s=>{const option=document.createElement('option');option.value=s.index;option.textContent=s.title;return option;}));
+ for(const id of ['outline','notes-button','print'])$(id).disabled=false;
+});
+player.on('state',state=>{
+ $('page').textContent=`${state.page+1} / ${state.totalPages}`;$('outline').value=state.index;
+ $('prev').disabled=state.page===0;$('next').disabled=state.page===state.totalPages-1;
+ $('play').disabled=!state.canPlay;$('play').textContent=state.playing&&!state.paused?'⏸ 暂停讲解':'▶ 播放讲解';
+ $('notes').textContent=state.notes;$('auto').checked=state.autoNext;
+});
+player.on('loading',()=>{$('status').textContent='正在加载…';});
+player.on('fallback',event=>{$('status').textContent=event.message;frame.dataset.localCopy='true';});
+player.on('ready',()=>{if(frame.dataset.localCopy)$('status').textContent='本地副本';});
+player.on('error',event=>{$('status').textContent=event.message;});
+$('prev').onclick=()=>player.previous();$('next').onclick=()=>player.next();$('play').onclick=()=>player.play();
+$('outline').onchange=event=>player.goTo(Number(event.target.value));$('auto').onchange=event=>player.setAutoPlay(event.target.checked);
+$('notes-button').onclick=()=>$('notes-dialog').showModal();$('print').onclick=()=>player.print();
+window.addEventListener('pagehide',()=>player.destroy());
+(async()=>{
+ const params=new URLSearchParams(location.search),endpoint=params.get('config'),content=params.get('content');
+ if(endpoint){
+  const url=new URL(endpoint,location.href);if(url.origin!==location.origin)throw new Error('请通过同源服务端读取课件配置。');
+  const response=await fetch(url);const data=await response.json();if(!response.ok)throw new Error(data.detail||'无法读取课件配置');lastConfig=data;
+ }else if(content)lastConfig={contentUrl:content};
+ else throw new Error('请通过 config 指定课件配置地址，或通过 content 指定纯内容页地址。');
+ player.load(lastConfig);
+})().catch(error=>{$('status').textContent=error.message;});
+</script></body></html>

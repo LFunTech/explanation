@@ -3,7 +3,10 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .diagrams import Diagram
+from .narration import page_narration
 from .scope import TeachingScope
+from .grades import GRADE_NAMES, normalize_grades
+from .page_content import complete_page_content
 
 
 class StrictModel(BaseModel):
@@ -17,14 +20,65 @@ class SubQuestion(StrictModel):
     analysis: str = Field(default='', max_length=20000)
 
 
+class TargetKnowledgePoint(StrictModel):
+    # Old clients/model outputs may include metadata fields (including the
+    # retired knowledge_point_id). They must not block otherwise usable targets.
+    model_config = ConfigDict(extra='ignore', str_strip_whitespace=True, json_schema_extra={'additionalProperties':False})
+    knowledge_point: str = Field(min_length=1, max_length=2000)
+    grade: str = Field(default='', description='本条知识点及课标要求对应的唯一年级；不同年级必须分成独立条目')
+    grade_source: Literal['knowledge_base','llm','manual','unknown'] = Field(default='unknown', description='年级标签来源，由程序设置')
+    curriculum_requirements: list[str] = Field(default_factory=list, description='仅与当前知识点关联的课标要求')
+
+    @model_validator(mode='before')
+    @classmethod
+    def legacy_grade(cls, data):
+        if isinstance(data,dict) and 'grade' not in data:
+            data=dict(data)
+            values=data.get('grades',[])
+            grades=normalize_grades(values) if isinstance(values,list) and all(isinstance(v,str) for v in values) else []
+            # Shared requirements cannot be assigned to several grades by copying
+            # them. Keep ambiguous legacy entries unassigned for re-analysis.
+            data['grade']=grades[0] if len(grades)==1 else ''
+        return data
+
+    @field_validator('grade')
+    @classmethod
+    def valid_grade(cls, value):
+        if not value:return ''
+        grade=normalize_grades([value])[0]
+        if grade not in GRADE_NAMES.values():
+            raise ValueError('每条课标只能选择一个年级，须为一年级至高三')
+        return grade
+
+    @model_validator(mode='after')
+    def label_source(self):
+        if not self.grade:
+            self.grade_source='unknown'
+        elif self.grade_source=='unknown':
+            self.grade_source='manual'
+        return self
+
+    @field_validator('curriculum_requirements')
+    @classmethod
+    def valid_requirements(cls, values):
+        if any(not v.strip() or len(v)>2000 for v in values):
+            raise ValueError('课标要求不能为空或超过 2000 字符')
+        return list(dict.fromkeys(v.strip() for v in values))
+
+
 class Question(StrictModel,TeachingScope):
     question_id: str = Field(min_length=1, max_length=100)
     stem: str = Field(min_length=1, max_length=20000)
     subject: Literal['数学', '物理', '化学', '生物', '科学', '语文', '英语', '历史', '地理', '道德与法治'] = '数学'
-    grade: str = Field(default='九年级', min_length=1, max_length=30)
+    grade: str = Field(default='', max_length=30)
+    grades: list[str] = Field(default_factory=list,description='题目适用年级，可多选；grade 兼容旧客户端')
+    source_grades: list[str] = Field(default_factory=list,description='公共题库记录的原始年级')
     region: str = Field(default='上海', min_length=1, max_length=40)
     knowledge_points: list[str] = Field(default_factory=list, max_length=20)
     knowledge_point_ids: list[str] = Field(default_factory=list, max_length=20)
+    target_grade: str = Field(default='', max_length=30, description='独立指定的教学目标年级；提交生成时必填，不从题目年级推断')
+    target_semester: Literal['全学期','上半学期','下半学期'] = Field(default='全学期', description='目标学期，省略时为全学期')
+    target_curriculum: list[TargetKnowledgePoint] = Field(default_factory=list, description='目标课标：知识点与对应课标要求的 JSON 数组；为空时采用原题知识点')
     source: str = Field(default='', max_length=200)
     requires_images: bool = False
     question_type: str = Field(default='解答题', min_length=1, max_length=30)
@@ -42,8 +96,22 @@ class Question(StrictModel,TeachingScope):
             raise ValueError('条目不能为空或超过 2000 字符')
         return list(dict.fromkeys(v.strip() for v in values))
 
+    @field_validator('target_grade')
+    @classmethod
+    def valid_target_grade(cls, value):
+        if not value:
+            return ''  # Reading legacy packages and previewing source questions remain supported.
+        grade=normalize_grades([value])[0]
+        if grade not in GRADE_NAMES.values():
+            raise ValueError('目标年级须为一年级至高三中的一个年级')
+        return grade
+
     @model_validator(mode='after')
     def unique_subquestions(self):
+        # Preserve fields_set so legacy scalar defaults can be distinguished from
+        # an explicit multi-grade choice when resolving public source metadata.
+        object.__setattr__(self,'grades',normalize_grades(self.grades or self.source_grades or [self.grade]))
+        object.__setattr__(self,'grade',next(iter(self.grades),''))
         ids = [q.id for q in self.sub_questions]
         if len(ids) != len(set(ids)):
             raise ValueError('小题 ID 不得重复')
@@ -53,9 +121,47 @@ class Question(StrictModel,TeachingScope):
 class GenerationOptions(StrictModel):
     mode: Literal['qwen', 'sample'] = 'qwen'
     depth: Literal['brief', 'standard', 'deep'] = 'standard'
-    variant_count: int = Field(default=2, ge=0, le=5)
+    variant_count: int = Field(default=2, ge=0)
     voice: bool = True
     force: bool = False
+    generation_requirements: str = Field(default='', max_length=8000, description='本次生成的补充要求；仍须遵守题目事实、目标年级及课标')
+
+
+class CoursewareRequest(StrictModel):
+    question_id: str = Field(min_length=1, max_length=100, description='exam 公共题库 UUID，兼容 exam:public:UUID')
+    target_grade: str = Field(min_length=1, max_length=30)
+    target_semester: Literal['全学期','上半学期','下半学期'] = '全学期'
+    target_curriculum: list[TargetKnowledgePoint] = Field(default_factory=list)
+    options: GenerationOptions = Field(default_factory=GenerationOptions)
+    assignment_id: str = Field(default='', max_length=100)
+    title: str = Field(default='', max_length=150)
+    generation_requirements: str = Field(default='', max_length=8000)
+
+    @field_validator('question_id')
+    @classmethod
+    def public_question_id(cls, value):
+        from uuid import UUID
+        try:return 'exam:public:'+str(UUID(value.removeprefix('exam:public:')))
+        except ValueError:raise ValueError('题目 ID 须为 exam 公共题库 UUID') from None
+
+    @field_validator('target_grade')
+    @classmethod
+    def required_target_grade(cls, value):
+        return Question.valid_target_grade(value)
+
+
+class CoursewareUpdate(StrictModel):
+    title: str = Field(default='', min_length=1, max_length=150)
+    target_grade: str = Field(default='', min_length=1, max_length=30)
+    target_semester: Literal['全学期','上半学期','下半学期'] = '全学期'
+    target_curriculum: list[TargetKnowledgePoint] = Field(default_factory=list)
+    generation_requirements: str = Field(default='', max_length=8000)
+    options: GenerationOptions = Field(default_factory=GenerationOptions)
+
+    @field_validator('target_grade')
+    @classmethod
+    def required_target_grade(cls, value):
+        return Question.valid_target_grade(value)
 
 
 class JobRequest(StrictModel):
@@ -73,80 +179,105 @@ class JobRequest(StrictModel):
         return self
 
 
-class Point(StrictModel):
-    title: str = Field(min_length=1, max_length=100)
-    display: str = Field(min_length=1, max_length=12000)
-    notes: str = Field(min_length=1, max_length=20000)
+class GeneratedModel(BaseModel):
+    # Presentation content is not rejected for size, counts or stylistic metadata.
+    model_config = ConfigDict(extra='ignore', str_strip_whitespace=True)
 
 
-class Variant(StrictModel):
-    question_id: str | None = Field(default=None, max_length=100)
-    source: Literal['generated', 'resource'] = 'generated'
-    stem: str = Field(min_length=1, max_length=10000)
-    answer: str = Field(min_length=1, max_length=10000)
-    analysis: str = Field(min_length=1, max_length=20000)
-    knowledge_points: list[str] = Field(default_factory=list, max_length=20)
+class Point(GeneratedModel):
+    title: str = ''
+    display: str = ''
+    notes: str = ''
 
 
-class Lesson(StrictModel):
-    title: str = Field(min_length=1, max_length=100)
-    objective: str = Field(min_length=1, max_length=1000)
-    knowledge_points: list[Point] = Field(min_length=1, max_length=16)
-    solution_steps: list[Point] = Field(min_length=1, max_length=20)
-    answer: str = Field(min_length=1, max_length=10000)
-    pitfalls: list[Point] = Field(min_length=1, max_length=6)
-    summary: list[str] = Field(min_length=1, max_length=8)
-    variants: list[Variant] = Field(default_factory=list, max_length=5)
+class Variant(GeneratedModel):
+    question_id: str | None = None
+    source: str = 'generated'
+    stem: str = ''
+    answer: str = ''
+    analysis: str = ''
+    knowledge_points: list[str] = Field(default_factory=list)
+    source_image_indices: list[int] = Field(default_factory=list, description='沿用原题配图时填写附件索引（从0开始）；独立变式不得引用无关原图')
+
+
+class Lesson(GeneratedModel):
+    title: str = '题目讲解'
+    objective: str = ''
+    knowledge_points: list[Point] = Field(default_factory=list)
+    solution_steps: list[Point] = Field(default_factory=list)
+    answer: str = ''
+    pitfalls: list[Point] = Field(default_factory=list)
+    summary: list[str] = Field(default_factory=list)
+    variants: list[Variant] = Field(default_factory=list)
 
 
 class KnowledgePoint(Point):
-    why: str = Field(min_length=1, max_length=2000, description='原理为什么成立、适用条件；不能只复述定义')
-    application: str = Field(min_length=1, max_length=2000, description='用本题具体条件、数值或图形说明如何应用')
-    resource_ids: list[str] = Field(default_factory=list,max_length=6,description='本知识实际依据的课标/知识资源 ID；资源暂缺时留空，不编造课标依据')
+    why: str = Field(default='', description='原理或适用条件')
+    application: str = Field(default='', description='用本题条件说明如何应用')
+    resource_ids: list[str] = Field(default_factory=list, description='实际采用的知识资源 ID')
 
 
 class SolutionStep(Point):
-    title: str = Field(min_length=1, max_length=45)
-    display: str = Field(min_length=1, max_length=160, description='流程图节点中的关键运算、公式或判断；不能只有空泛动作')
-    narration: str = Field(min_length=1, max_length=220, description='这个步骤对应的简明口语讲解，说明动作及依据；详细推导仍放 notes')
+    narration: str = Field(default='', description='本步骤的实际口语讲解，不限制字数')
 
 
-class LecturePage(StrictModel):
-    kind: Literal['原题', '知识', '解题', '答案', '总结']
-    title: str = Field(min_length=1, max_length=35)
-    display: str = Field(min_length=1, max_length=230, description='上屏重点，最多四个短段落；长题干由服务端原样展示')
-    narration: str = Field(min_length=1, max_length=800, description='本页实际口语台词，解释为什么；不要与 display 拼接重复朗读')
-    knowledge_indices: list[int] = Field(default_factory=list, max_length=4, description='本页讲解的 knowledge_points 从零开始索引')
-    solution_indices: list[int] = Field(default_factory=list, max_length=4, description='仅解题页填写，从零开始；对应步骤会原样画成流程节点，并依次朗读各步骤 narration')
+class LecturePage(GeneratedModel):
+    kind: str = Field(default='知识', description='原题、知识、解题、答案、总结等页面类型')
+    title: str = ''
+    display: str = Field(default='', description='上屏内容，不限制字数，由排版负责呈现')
+    narration: str = Field(default='', description='本页口语讲解；解题页可由步骤台词组合')
+    knowledge_indices: list[int] = Field(default_factory=list)
+    solution_indices: list[int] = Field(default_factory=list)
+    variant_index: int | None = Field(default=None, description='变式页对应 variants 的索引，从0开始；其他页为空')
     diagram: Diagram | None = None
-    visual_reason: str = Field(min_length=1, max_length=300, description='配图帮助理解哪个关系；无需图时说明原因')
+    source_image_index: int | None = Field(default=None,description='直接引用原题附件，索引从0开始；看原图、数实物及对比选项时优先使用')
+    source_image_caption: str = Field(default='',description='指出应观察原图中的哪些对象、位置或条件')
+    visual_reason: str = ''
+
+    @field_validator('diagram', mode='wrap')
+    @classmethod
+    def optional_figure(cls, value, handler):
+        # An unusable optional illustration must not block the PPT and full text.
+        try:
+            return handler(value)
+        except (ValueError, TypeError):
+            return None
 
 
 class IllustratedLesson(Lesson):
-    complexity: Literal['simple', 'complex'] = Field(description='按实际题目步骤与推理判断；常规单步或两步题必须 simple')
-    knowledge_points: list[KnowledgePoint] = Field(min_length=1, max_length=4)
-    solution_steps: list[SolutionStep] = Field(min_length=1, max_length=16)
-    pages: list[LecturePage] = Field(min_length=3, max_length=10)
+    complexity: str = Field(default='simple', description='描述性标签，不控制页数、字数或时长')
+    knowledge_points: list[KnowledgePoint] = Field(default_factory=list)
+    solution_steps: list[SolutionStep] = Field(default_factory=list)
+    pages: list[LecturePage] = Field(default_factory=list)
 
     @model_validator(mode='after')
-    def lecture_coverage(self):
-        if self.complexity == 'simple' and len(self.pages) > 5:
-            raise ValueError('简单题最多 5 页；完整解析和变式题放阅读区')
-        if sum(p.kind == '原题' for p in self.pages) != 1 or self.pages[0].kind != '原题':
-            raise ValueError('必须以唯一的原题页开场，不增加空泛封面')
-        if not any(p.kind == '答案' for p in self.pages):
-            raise ValueError('讲解中须有答案与检验页')
-        for field, points in [('knowledge_indices', self.knowledge_points), ('solution_indices', self.solution_steps)]:
-            used = {i for p in self.pages for i in getattr(p, field)}
-            if used != set(range(len(points))):
-                raise ValueError(field+' 必须准确覆盖所有知识点或解题步骤')
+    def prepare_presentation(self):
+        for step in self.solution_steps:
+            step.narration=step.narration or step.notes or step.display
+        steps=[step.model_dump() for step in self.solution_steps]
+        used=set()
         for page in self.pages:
-            if page.kind=='解题' and not page.solution_indices or page.kind!='解题' and page.solution_indices:
-                raise ValueError('解题步骤须集中在解题页，以流程图呈现，每页最多四个节点')
-            if page.kind=='解题':
-                page.narration='\n'.join(self.solution_steps[i].narration for i in page.solution_indices)
-        if self.complexity == 'simple' and sum(len(p.narration) for p in self.pages) > 420:
-            raise ValueError('简单题台词总计最多 420 字符，目标一至两分钟；完整推导保留在详细解析')
+            page.knowledge_indices=list(dict.fromkeys(i for i in page.knowledge_indices if 0<=i<len(self.knowledge_points)))
+            page.solution_indices=list(dict.fromkeys(i for i in page.solution_indices if 0<=i<len(steps))) if page.kind=='解题' else []
+            used.update(page.solution_indices)
+            if page.solution_indices:
+                page.narration=page_narration(page.model_dump(),steps)
+            else:
+                page.narration=page.narration or page.display
+        # Missing references become additional display pages, not generation errors.
+        if self.pages:
+            missing=[i for i in range(len(steps)) if i not in used]
+            position=next((i for i,p in enumerate(self.pages) if p.kind=='答案'),len(self.pages))
+            for offset in range(0,len(missing),4):
+                indices=missing[offset:offset+4]
+                self.pages.insert(position,LecturePage(kind='解题',title='解题过程',solution_indices=indices,
+                    display='\n'.join(steps[i]['display'] for i in indices),
+                    narration='\n'.join(steps[i]['narration'] for i in indices)))
+                position+=1
+        reading=self.model_dump()
+        self.pages=[LecturePage.model_validate(page) for page in complete_page_content(reading['pages'],reading)]
+        self.summary=reading['summary']
+        self.pitfalls=[Point.model_validate(point) for point in reading['pitfalls']]
         return self
 
 

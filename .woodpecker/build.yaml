@@ -1,0 +1,22 @@
+workspace:
+  base: /woodpecker
+  path: src
+labels:
+  platform: linux/amd64
+when:
+  - event: tag
+    evaluate: 'CI_COMMIT_TAG matches "^(test|prod)-v[0-9]+[.][0-9]+[.][0-9]+$"'
+depends_on:
+  - validate
+steps:
+  - name: build-amd64
+    image: docker-hub.f123.pub/devops/kaniko:v1.14.0-debug
+    environment:
+      REGISTRY: docker-hub.f123.pub
+      IMAGE_REPO: docker-hub.f123.pub/lfun/explanation
+      DOCKER_USERNAME:
+        from_secret: DOCKER_USERNAME
+      DOCKER_PASSWORD:
+        from_secret: DOCKER_PASSWORD
+    commands:
+      - sh scripts/ci/build-image.sh

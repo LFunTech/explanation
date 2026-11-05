@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     qwen_model: str = 'qwen-plus'
     qwen_vision_model: str = 'qwen3-vl-plus'
     qwen_timeout: int = Field(default=180, ge=10, le=600)
+    qwen_independent_review: bool = False
     tts_mode: str = 'browser'
     qwen_tts_url: str = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation'
     qwen_tts_model: str = 'qwen3-tts-flash'
@@ -21,12 +22,13 @@ class Settings(BaseSettings):
     api_key: str = ''
     public_base_url: str = ''
     data_dir: Path = ROOT / 'data'
-    worker_concurrency: int = Field(default=2, ge=1, le=8)
+    worker_concurrency: int = Field(default=20, ge=1, le=20)
     callback_allowed_urls: str = ''
     callback_secret: str = ''
     knowledge_api_url: str = ''
     knowledge_api_key: str = ''
     s3_endpoint_url: str = ''
+    s3_public_endpoint_url: str = ''
     s3_bucket: str = ''
     s3_access_key_id: str = ''
     s3_secret_access_key: str = ''
@@ -56,6 +58,7 @@ class Settings(BaseSettings):
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
     def generation_identity(self):
-        return dict(pipeline='illustrated-flow-v5', model=self.qwen_model,
+        return dict(pipeline='grade-linked-figures-v6', model=self.qwen_model,
                     vision_model=self.qwen_vision_model, endpoint=self.qwen_base_url,
+                    independent_review=self.qwen_independent_review,
                     tts_mode=self.tts_mode, tts_model=self.qwen_tts_model, voice=self.qwen_tts_voice)

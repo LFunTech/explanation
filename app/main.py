@@ -11,20 +11,26 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import ROOT, Settings
 from .engine import Engine, package_links, signed_token
-from .exam import Exam
+from .exporters import html_player
+from .exam import Exam, apply_public_grades
+from .exam_cache import ExamCache
+from .grades import normalize_grades
 from .images import normalize_image
 from .kb import KnowledgeBase, document_chunks
-from .models import JobRequest, ResourceImport
+from .models import CoursewareRequest, CoursewareUpdate, JobRequest, ResourceImport, Question
+from .question_layout import question_layout
 from .providers import GenerationError
 from .samples import SAMPLES, seed_resources
 from .store import Conflict, Store, digest
+from .storage import object_urls as storage_object_urls
 from .scope import TeachingScope, validate_document_metadata
+from .target_analysis import CurriculumAnalysis, analyze_targets, while_connected
 
 
 def create_app(settings=None):
@@ -50,6 +56,7 @@ def create_app(settings=None):
             task.cancel()
         await asyncio.gather(*background,return_exceptions=True)
         await engine.close()
+        Exam.close_connections()
         lock.close()
 
     app=FastAPI(title='题解工坊 · 课件生成服务',version='0.1.0',lifespan=lifespan)
@@ -85,6 +92,9 @@ def create_app(settings=None):
         response.headers['Referrer-Policy']='no-referrer'
         if request.url.path.startswith('/api/'):
             response.headers['Cache-Control']='no-store'
+        elif request.url.path=='/' or (request.url.path.startswith('/static/') and '/vendor/' not in request.url.path):
+            # Revalidate app HTML/modules on navigation after an update.
+            response.headers['Cache-Control']='no-cache'
         return response
 
     @app.exception_handler(GenerationError)
@@ -102,6 +112,7 @@ def create_app(settings=None):
     @app.get('/api/config')
     def config(request:Request):
         return dict(qwen_configured=bool(cfg.dashscope_api_key),model=cfg.qwen_model,tts_mode=cfg.tts_mode,
+            independent_review=cfg.qwen_independent_review,
             auth_required=bool(cfg.api_key),authenticated=authorized(request),region='上海',
             exam_configured=bool(cfg.exam_db_host),knowledge_configured=bool(cfg.vector_database_url))
 
@@ -129,14 +140,91 @@ def create_app(settings=None):
                 manifest=store.package(item['package_id'])
                 item['result']={**package_links(cfg,item['package_id']),
                     'slide_count':manifest['slide_count'],'title':manifest['title'],'voice_mode':manifest['voice_mode'],
-                    'variants':manifest['variants'],'mode':manifest['mode']}
+                    'variants':manifest['variants'],'mode':manifest['mode'],
+                    'storage':manifest.get('storage'),
+                    'teaching_target':manifest.get('teaching_target'),
+                    'review_type':manifest.get('review',{}).get('type')}
         return job
 
+    def project_courseware(job, reused=False):
+        job=project_job(job);item=job['items'][0]
+        return {**job,'courseware_id':item['id'],'job_id':job['id'],
+            'status_url':f'/api/courseware/{item["id"]}',
+            'stage':item['stage'],'error':item['error'],
+            'generation_requirements':job['request']['options'].get('generation_requirements',''),
+            'result':item.get('result') if item['status']=='completed' else None,
+            'previous_result':item.get('result') if item['status']!='completed' else None,
+            'idempotent_replay':reused}
+
+    @app.post('/api/courseware',status_code=202)
+    def create_courseware(body:CoursewareRequest,idempotency_key:str|None=Header(default=None,max_length=200)):
+        request_hash=digest(dict(endpoint='courseware',request=body.model_dump()))
+        replay=store.lesson_replay(idempotency_key,request_hash)
+        if replay:return project_courseware(store.job(replay),True)
+        try:
+            question=Exam(cfg).question(body.question_id)
+            question.target_grade=body.target_grade
+            question.target_semester=body.target_semester
+            question.target_curriculum=body.target_curriculum
+            from .teaching import validate_target_curriculum
+            validate_target_curriculum(question)
+            if question.requires_images:
+                question.images=Exam(cfg).images(question.question_id)['images']
+                if not question.images:
+                    raise HTTPException(422,'这道题缺少原图，请先补齐题库附件再生成。')
+            question.images=[normalize_image(image) for image in question.images]
+        except GenerationError as error:
+            if error.code=='exam_question_missing':raise HTTPException(404,str(error)) from None
+            if error.code in {'exam_image_missing','exam_image_count'}:raise HTTPException(422,str(error)) from None
+            raise
+        except ValueError as error:
+            raise HTTPException(422,str(error)) from None
+        title=body.title or ((body.target_curriculum[0].knowledge_point if body.target_curriculum else
+                            next(iter(question.knowledge_points),question.subject))[:140]+' · 题目讲解')
+        if 'generation_requirements' in body.model_fields_set:
+            body.options.generation_requirements=body.generation_requirements
+        request=JobRequest(assignment_id=body.assignment_id or 'courseware-'+body.question_id.removeprefix('exam:public:'),
+                          title=title,questions=[question],options=body.options)
+        job_id,reused=store.create_lesson(request,idempotency_key,request_hash=request_hash)
+        return project_courseware(store.job(job_id),reused)
+
+    @app.get('/api/courseware')
+    def courseware_list(page:int=Query(default=1,ge=1),page_size:int=Query(default=20,ge=1,le=100),
+                        query:str=Query(default='',max_length=500),grade:str=Query(default='',max_length=30),
+                        knowledge_point:str=Query(default='',max_length=500),
+                        status:str=Query(default='all',pattern='^(all|active|pending|generating|completed|failed)$')):
+        result=store.lesson_page(page,page_size,query=query,grade=grade,knowledge_point=knowledge_point,status=status)
+        result['items']=[project_job(job) for job in result['items']]
+        return result
+
+    @app.get('/api/courseware/{courseware_id}')
+    def get_courseware(courseware_id:str):
+        job=store.courseware_job(courseware_id)
+        if not job:raise HTTPException(404,'课件不存在')
+        return project_courseware(job)
+
+    @app.patch('/api/courseware/{courseware_id}',status_code=202)
+    def update_courseware(courseware_id:str,body:CoursewareUpdate,idempotency_key:str|None=Header(default=None,max_length=200)):
+        try:
+            job_id,reused=store.update_courseware(courseware_id,body.model_dump(exclude_unset=True),idempotency_key)
+        except KeyError:raise HTTPException(404,'课件不存在') from None
+        except Conflict:raise
+        except ValueError as error:raise HTTPException(422,str(error)) from None
+        return project_courseware(store.job(job_id),reused)
+
     @app.post('/api/jobs',status_code=202)
-    def create_job(body:JobRequest,idempotency_key:str|None=Header(default=None,max_length=200)):
+    def create_job(body:JobRequest,idempotency_key:str|None=Header(default=None,max_length=200),single_question:bool=False):
         if body.callback_url and (not cfg.callback_secret or body.callback_url not in cfg.callback_allowed_urls.split(',')):
             raise HTTPException(422,'回调地址须由服务端配置到 CALLBACK_ALLOWED_URLS，且须配置签名密钥')
         try:
+            source_questions=[q for q in body.questions if q.question_id.startswith('exam:public:')
+                and q.source=='exam/public/question/'+q.question_id.removeprefix('exam:public:')]
+            if cfg.exam_db_host and source_questions:
+                metadata=Exam(cfg).question_metadata([q.question_id for q in source_questions])
+                for question in source_questions:
+                    if question.question_id in metadata:
+                        apply_public_grades(question,metadata[question.question_id]['grades'],
+                            preserve_selection='grades' in question.model_fields_set)
             for question in body.questions:
                 if (question.requires_images and not question.images and question.question_id.startswith('exam:public:')
                         and question.source=='exam/public/question/'+question.question_id.removeprefix('exam:public:')):
@@ -144,16 +232,21 @@ def create_app(settings=None):
                 question.images=[normalize_image(i) for i in question.images]
                 if question.requires_images and not question.images:
                     raise ValueError('这道题含图片附件，请先上传原题图片，避免缺图生成错误讲解。')
-            job_id,reused=store.create_job(body,idempotency_key)
+                if not question.target_grade:
+                    raise ValueError('请填写目标年级；原题年级仅作为来源信息，不会自动用于讲解。')
+                from .teaching import validate_target_curriculum
+                validate_target_curriculum(question)
+            job_id,reused=(store.create_lesson if single_question else store.create_job)(body,idempotency_key)
         except ValueError as error:
             if isinstance(error,Conflict):
                 raise
             raise HTTPException(422,str(error)) from error
+        if single_question:return project_courseware(store.job(job_id),reused)
         return {**project_job(store.job(job_id)),'idempotent_replay':reused}
 
     @app.get('/api/jobs')
-    def jobs(assignment_id:str|None=None):
-        return [project_job(j) for j in store.list_jobs(assignment_id)]
+    def jobs(assignment_id:str|None=None,unique_questions:bool=False):
+        return [project_job(j) for j in (store.list_lessons() if unique_questions else store.list_jobs(assignment_id))]
 
     @app.get('/api/jobs/{job_id}')
     def job(job_id:str):
@@ -164,6 +257,9 @@ def create_app(settings=None):
 
     @app.post('/api/jobs/{job_id}/retry',status_code=202)
     def retry(job_id:str):
+        previous=store.job(job_id)
+        if previous and any(not i['question'].get('target_grade') for i in previous['items'] if i['status']=='failed'):
+            raise HTTPException(422,'请先补充目标年级，再重新生成本题。')
         try:
             store.retry(job_id)
         except KeyError:
@@ -203,11 +299,16 @@ def create_app(settings=None):
         except ValueError as error:
             raise HTTPException(422,str(error))
 
+    @app.post('/api/questions/layout')
+    def preview_question(body:Question):
+        return question_layout(body.model_dump())
+
     @app.get('/api/exam/questions')
-    async def exam_questions(subject:str='数学',grade:str='九年级',query:str=''):
+    async def exam_questions(subject:str='数学',grade:str='',query:str='',region:str='上海',grades:list[str]|None=Query(default=None)):
         if len(query)>200:
             raise HTTPException(422,'搜索词过长')
-        return await asyncio.to_thread(Exam(cfg).search,subject,grade,query)
+        rows = await asyncio.to_thread(Exam(cfg).search,subject,grade,query,region=region,grades=grades)
+        return [{**row, 'layout':question_layout(row['question'])} for row in rows]
 
     @app.get('/api/exam/questions/{question_id}/images')
     async def exam_images(question_id:UUID):
@@ -215,14 +316,29 @@ def create_app(settings=None):
 
     @app.get('/api/exam/questions/random')
     async def random_questions(subject:str=Query(default='数学',max_length=30),
-            grade:str=Query(default='九年级',max_length=30),region:str=Query(default='上海',max_length=40),
-            limit:int=Query(default=3,ge=1,le=6),exclude:str=Query(default='',max_length=2000)):
+            grade:str=Query(default='',max_length=30),region:str=Query(default='上海',max_length=40),
+            limit:int=Query(default=3,ge=1,le=6),exclude:str=Query(default='',max_length=2000),grades:list[str]|None=Query(default=None)):
         excluded=[value.strip() for value in exclude.split(',') if value.strip()]
         if len(excluded)>30:
             raise HTTPException(422,'最多排除 30 道题')
+        def cached():
+            return ExamCache(cfg).random_questions(subject,normalize_grades(grades if grades is not None else [grade]),region,limit,excluded)
+        task=asyncio.create_task(asyncio.to_thread(Exam(cfg).random_questions,subject,grade,region,limit,excluded,grades=grades))
+        background.add(task)
+        def completed(done):
+            background.discard(done)
+            if not done.cancelled():done.exception()
+        task.add_done_callback(completed)
         try:
-            return await asyncio.to_thread(Exam(cfg).random_questions,subject,grade,region,limit,excluded)
-        except GenerationError:
+            try:return await asyncio.wait_for(asyncio.shield(task),timeout=4)
+            except asyncio.TimeoutError:
+                saved=cached()
+                if saved:return saved
+                return await task
+        except GenerationError as error:
+            if error.code=='exam_unavailable':
+                saved=cached()
+                if saved:return saved
             raise
         except Exception:
             raise HTTPException(503,'暂时无法读取题库，请稍后点击“换一批”重试。') from None
@@ -236,6 +352,51 @@ def create_app(settings=None):
     @app.get('/api/kb/graph')
     async def graph(subject:str='',query:str=''):
         return await asyncio.to_thread(kb.graph,subject,query[:200])
+
+    @app.get('/api/teaching-targets')
+    async def target_catalog(request:Request,subject:str='数学',target_grade:str='',query:str=Query('',max_length=200),region:str='上海'):
+        if not target_grade:
+            return dict(items=[],notice='请选择目标年级后查看知识点。')
+        if not cfg.vector_database_url:
+            return dict(items=[],notice='知识库尚未配置，暂时无法获取库内课标。')
+        try:
+            points=await asyncio.to_thread(kb.target_curriculum,subject,target_grade,query.strip(),region)
+            points=[p for p in points if p.get('grade')==target_grade]
+            stages=list(dict.fromkeys(s['stage'] for p in points for s in p.get('curriculum_sources',[]) if s.get('stage')))
+            notice=('已按目标年级匹配'+ '、'.join(stages)+'课标原文；学段要求不代表单一年级或学期的教材进度。') if stages else ''
+            return dict(items=target_response_points(points,request),notice=notice,
+                curriculum_sources=[dict(knowledge_point=p['knowledge_point'],grade=p['grade'],
+                    curriculum_requirements=p['curriculum_requirements'],sources=p.get('curriculum_sources',[])) for p in points])
+        except Exception:
+            return dict(items=[],notice='知识点列表暂时无法读取，请稍后重试。')
+
+    def target_response_points(points,request):
+        # One knowledge point / one grade / multiple requirements on every client.
+        fields={'knowledge_point','grade','grade_source','curriculum_requirements'}
+        return [{k:v for k,v in point.items() if k in fields} for point in points]
+
+    @app.post('/api/teaching-targets/analyze')
+    async def analyze_target(question:Question,request:Request):
+        if not question.target_grade:
+            raise HTTPException(422,'请先选择目标年级，再分析目标课标。')
+        async def run():
+            references=[]
+            if cfg.vector_database_url:
+                try:
+                    rows=await asyncio.wait_for(asyncio.gather(*[
+                        asyncio.to_thread(kb.target_curriculum,question.subject,question.target_grade,name,question.region,24)
+                        for name in (question.knowledge_points[:6] or [''])]),timeout=5)
+                    references=list({(p['knowledge_point'],p.get('grade','')):p for group in rows for p in group}.values())
+                    if not any(p.get('grade') and p.get('curriculum_requirements') for p in references):
+                        references=await asyncio.wait_for(asyncio.to_thread(kb.target_curriculum,
+                            question.subject,question.target_grade,'',question.region,200),timeout=5)
+                except Exception:
+                    return dict(**CurriculumAnalysis(note='暂时无法读取本地课标库，未自动填写要求，请稍后重试。').model_dump(),source='knowledge_base')
+            result=await analyze_targets(question,cfg,references)
+            data=result.model_dump()
+            data['target_curriculum']=target_response_points(data['target_curriculum'],request)
+            return dict(**data,source='knowledge_base')
+        return await while_connected(request,run())
 
     @app.get('/api/kb/search')
     async def search_kb(query:str,subject:str='数学',grade:str='九年级',region:str='上海',
@@ -282,15 +443,89 @@ def create_app(settings=None):
         except (ValueError,TypeError) as error:
             raise HTTPException(422,str(error))
 
-    @app.get('/packages/{package_id}/{filename:path}')
-    def package(package_id:str,filename:str,request:Request,token:str='',expires:int=0):
+    def check_package_access(package_id,request,token,expires):
         if not re.fullmatch(r'[a-f0-9]{32}',package_id) or not store.package(package_id):
             raise HTTPException(404,'讲解包不存在或尚未完成')
         if cfg.api_key and not authorized(request):
             if expires<time.time() or not hmac.compare_digest(token,signed_token(cfg,package_id,expires)):
                 raise HTTPException(403,'访问链接已过期，请重新查询生成结果')
-        allowed={'index.html','manifest.json','slides.json','narration.json','courseware.pptx','package.zip'}
-        if filename not in allowed and not re.fullmatch(r'audio/page-\d{3}\.wav',filename):
+
+    def local_content_config(package_id):
+        links=package_links(cfg,package_id)
+        online=(cfg.data_dir/'packages'/package_id/'online.html').is_file()
+        audio={}
+        if online:
+            narration=json.loads((cfg.data_dir/'packages'/package_id/'narration.json').read_text(encoding='utf-8'))
+            audio={s['page_id']:links['html_url'].replace('/index.html','/'+s['audio_file']) for s in narration if s.get('audio_file')}
+        return dict(contentUrl=links['content_url'] if online else links['html_url'],audio=audio,motion=True)
+
+    def minio_content_config(package_id):
+        storage=store.package(package_id).get('storage')
+        if not cfg.s3_bucket or not storage:
+            raise HTTPException(409,'课件尚未上传到对象存储，请上传完成后重新打开')
+        # The browser loads the remote object itself; the application only signs
+        # its URL and provides the independent player interface.
+        directory=cfg.data_dir/'packages'/package_id
+        filename='online.html' if 'online.html' in store.package(package_id).get('files',[]) else 'index.html'
+        narration=json.loads((directory/'narration.json').read_text(encoding='utf-8'))
+        urls=storage_object_urls(cfg,storage,[filename,*[s['audio_file'] for s in narration if s.get('audio_file')]])
+        audio={s['page_id']:urls[s['audio_file']] for s in narration if s.get('audio_file')}
+        return dict(contentUrl=urls[filename],audio=audio,motion=True,fallback=local_content_config(package_id))
+
+    @app.get('/embed/{package_id}/config')
+    def embed_config(package_id:str,request:Request,token:str='',expires:int=0,source:str=Query(default='local',pattern='^(local|minio)$')):
+        check_package_access(package_id,request,token,expires)
+        config=minio_content_config(package_id) if source=='minio' else local_content_config(package_id)
+        return JSONResponse(config,headers={'Cache-Control':'no-store'})
+
+    @app.get('/microapp/{package_id}/data')
+    def microapp_data(package_id:str,request:Request,token:str='',expires:int=0):
+        check_package_access(package_id,request,token,expires)
+        from .exporters import presentation_slides
+        from .question_layout import question_layout, variant_layout
+        manifest=store.package(package_id)
+        slides=json.loads((cfg.data_dir/'packages'/package_id/'slides.json').read_text(encoding='utf-8'))
+        return JSONResponse(dict(manifest=manifest,slides=presentation_slides(slides),
+            questionLayout=question_layout(manifest.get('question',{})),
+            variantLayouts=[variant_layout(v) for v in manifest.get('variants',[])],
+            audio=local_content_config(package_id)['audio']),headers={'Cache-Control':'no-store'})
+
+    @app.get('/static/microapp-runtime.js')
+    def microapp_runtime():
+        from .microapp import runtime_module
+        return Response(runtime_module(),media_type='text/javascript')
+
+    @app.get('/static/microapp-assets.json')
+    def microapp_assets():
+        from .microapp import styles, shell_markup
+        return dict(shellCss=styles('shell'),contentCss=styles('content'),shellHtml=shell_markup())
+
+    @app.get('/player/{package_id}',response_class=HTMLResponse)
+    def player(package_id:str,request:Request,token:str='',expires:int=0):
+        check_package_access(package_id,request,token,expires)
+        config=local_content_config(package_id)
+        return HTMLResponse(html_player(config['contentUrl'],config['audio']),headers={'Cache-Control':'no-store'})
+
+    @app.get('/minio-player/{package_id}',response_class=HTMLResponse)
+    def minio_player(package_id:str,request:Request,token:str='',expires:int=0):
+        check_package_access(package_id,request,token,expires)
+        config=minio_content_config(package_id)
+        return HTMLResponse(html_player(config['contentUrl'],config['audio'],fallback=config['fallback']),headers={'Cache-Control':'no-store'})
+
+    @app.get('/minio-package/{package_id}/player')
+    def minio_package_player(package_id:str,request:Request,token:str='',expires:int=0):
+        check_package_access(package_id,request,token,expires)
+        manifest=store.package(package_id)
+        if not cfg.s3_bucket or not manifest.get('storage') or 'player.html' not in manifest.get('files',[]):
+            raise HTTPException(409,'课件播放文件尚未上传，请上传完成后重新打开')
+        url=storage_object_urls(cfg,manifest['storage'],['player.html'])['player.html']
+        return RedirectResponse(url,status_code=307,headers={'Cache-Control':'no-store'})
+
+    @app.get('/packages/{package_id}/{filename:path}')
+    def package(package_id:str,filename:str,request:Request,token:str='',expires:int=0):
+        check_package_access(package_id,request,token,expires)
+        allowed={'index.html','online.html','player.html','manifest.json','slides.json','narration.json','courseware.pptx','package.zip'}
+        if filename not in allowed and not re.fullmatch(r'audio/page-\d{3}(?:-[a-f0-9]{12})?\.wav',filename):
             raise HTTPException(404,'文件不存在')
         path=cfg.data_dir/'packages'/package_id/filename
         if not path.is_file():

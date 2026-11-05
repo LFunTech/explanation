@@ -1,0 +1,12 @@
+# 生产环境；域名由 prod_config 中的 PUBLIC_BASE_URL 提取。
+ingress:
+  enabled: true
+persistence:
+  size: 100Gi
+resources:
+  requests:
+    cpu: "1"
+    memory: 2Gi
+  limits:
+    cpu: "4"
+    memory: 8Gi

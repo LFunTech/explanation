@@ -1,0 +1,26 @@
+image:
+  repository: docker-hub.f123.pub/lfun/explanation
+  tag: "" # 发布时必须指定不可变版本标签
+  pullPolicy: IfNotPresent
+  pullSecret: lfun
+configSecret: explanation-config
+persistence:
+  existingClaim: ""
+  storageClass: "" # 空值使用集群默认 StorageClass，需支持文件锁和 SQLite
+  size: 50Gi
+resources:
+  requests:
+    cpu: "500m"
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi
+ingress:
+  enabled: false
+  className: nginx
+  host: ""
+  tlsSecret: "" # 空值使用 Ingress 控制器的默认 TLS 证书
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "30m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"

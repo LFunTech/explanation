@@ -1,0 +1,22 @@
+workspace:
+  base: /woodpecker
+  path: src
+labels:
+  platform: linux/amd64
+when:
+  - event: [push, pull_request, tag, manual]
+steps:
+  - name: tests
+    image: python:3.12-slim-bookworm
+    environment:
+      DATA_DIR: /tmp/explanation-tests
+      PYTHONUTF8: "1"
+    commands:
+      - apt-get update && apt-get install -y --no-install-recommends fonts-noto-cjk
+      - pip install --no-cache-dir -r requirements-dev.txt
+      - python -m pytest -q
+  - name: chart
+    image: docker-hub.f123.pub/base/alpine:3.22.1
+    commands:
+      - sh scripts/ci/install-tools.sh
+      - sh scripts/ci/validate-chart.sh

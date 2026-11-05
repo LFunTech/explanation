@@ -1,0 +1,13 @@
+# 测试环境；域名由 test_config 中的 PUBLIC_BASE_URL 提取。
+ingress:
+  enabled: true
+  host: explanation-test.f123.pub
+persistence:
+  size: 50Gi
+resources:
+  requests:
+    cpu: "500m"
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi

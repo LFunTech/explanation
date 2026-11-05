@@ -1,0 +1,16 @@
+# 独立服务器部署。不要与根目录中仅提供知识库的 compose.yaml 混淆。
+services:
+  explanation:
+    image: ${EXPLANATION_IMAGE:?Set EXPLANATION_IMAGE to a versioned image}
+    env_file:
+      - ${EXPLANATION_ENV_FILE:-./runtime.env}
+    environment:
+      DATA_DIR: /data
+    ports:
+      - "127.0.0.1:${EXPLANATION_PORT:-18765}:18765"
+    volumes:
+      - courseware-data:/data
+    restart: unless-stopped
+    stop_grace_period: 90s
+volumes:
+  courseware-data:

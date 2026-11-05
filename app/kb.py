@@ -52,10 +52,11 @@ $$;
 '''
 
 
-def phase_for(grade, region='上海'):
+def phase_for(grade, region='上海', school_system=''):
+    if not grade:return ''
     if grade in {'高一','高二','高三','十年级','十一年级','十二年级'}:
         return 'senior'
-    if grade in {'七年级','八年级','九年级','初一','初二','初三','预备年级'} or (grade=='六年级' and region=='上海'):
+    if grade in {'七年级','八年级','九年级','初一','初二','初三','预备年级'} or (grade=='六年级' and (school_system=='五四制' or (not school_system and region=='上海'))):
         return 'junior'
     return 'primary'
 
@@ -94,6 +95,7 @@ class KnowledgeBase:
                 (document_id,title,source_type,Jsonb(metadata),digest(chunks)))
             ids = []
             for index, chunk in enumerate(chunks):
+                scoped={**metadata,**chunk.get('metadata',{})}
                 key = f'{document_id}:{index}'
                 ids.append(key)
                 content_hash = digest(chunk)
@@ -104,10 +106,10 @@ class KnowledgeBase:
                     knowledge_ids=excluded.knowledge_ids,labels=excluded.labels,metadata=excluded.metadata,
                     embedding=CASE WHEN kb_chunks.content_hash=excluded.content_hash THEN kb_chunks.embedding ELSE NULL END,
                     embedding_error=NULL,updated_at=now()''',
-                    (key,document_id,chunk['content'],content_hash,metadata['subject'],metadata.get('phase',''),
-                     metadata.get('region','全国'),metadata.get('grades',[]),
-                     [chunk['metadata']['knowledge_id']] if chunk.get('metadata',{}).get('knowledge_id') else metadata.get('knowledge_ids',[]),metadata.get('labels',[]),
-                     source_type,Jsonb({**metadata,**chunk.get('metadata',{}),'title':title})))
+                    (key,document_id,chunk['content'],content_hash,scoped['subject'],scoped.get('phase',''),
+                     scoped.get('region','全国'),scoped.get('grades',[]),
+                     [scoped['knowledge_id']] if scoped.get('knowledge_id') else scoped.get('knowledge_ids',[]),scoped.get('labels',[]),
+                     source_type,Jsonb({**scoped,'title':title})))
             db.execute('DELETE FROM kb_chunks WHERE document_id=%s AND NOT(id=ANY(%s))',(document_id,ids))
 
     async def embeddings(self, texts):
@@ -171,15 +173,18 @@ class KnowledgeBase:
                 progress(done)
         return done
 
-    async def search(self, query, subject, grade, region='上海', limit=8, include_graph=False, scope=None):
+    async def search(self, query, subject, grade, region='上海', limit=8, include_graph=False, scope=None,grades=None):
         scope=scope or {}
+        from .grades import normalize_grades
+        selected=normalize_grades(grades if grades is not None else [grade])
+        phases=list(dict.fromkeys(['',*[phase_for(g,region,scope.get('school_system','')) for g in selected]]))
         vector = (await self.embeddings([subject+'；'+query]))[0]
         with self.connect() as db:
             rows = db.execute('''SELECT id,content,source_type,grades,labels,metadata,embedding_model,embedding_dimensions,
                     kb_cosine(embedding,%s::real[]) AS score,
-                    CASE WHEN %s=ANY(grades) THEN 'grade' ELSE 'phase' END AS match_scope
+                    CASE WHEN grades && %s::text[] THEN 'grade' ELSE 'phase' END AS match_scope
                 FROM kb_chunks WHERE subject=%s AND region IN (%s,'全国')
-                    AND (%s=ANY(grades) OR (cardinality(grades)=0 AND phase IN ('',%s)))
+                    AND (grades && %s::text[] OR (cardinality(grades)=0 AND phase=ANY(%s::text[])))
                     AND (%s OR source_type<>'graph') AND embedding IS NOT NULL
                     AND (source_type<>'curriculum' OR %s='' OR COALESCE(NULLIF(metadata->>'curriculum_version',''),metadata->>'version')=%s)
                     AND (source_type<>'textbook' OR (%s<>'' AND %s<>'' AND %s<>'' AND %s<>''
@@ -187,7 +192,7 @@ class KnowledgeBase:
                         AND metadata->>'textbook_version'=%s AND metadata->>'volume'=%s))
                     AND embedding_model=%s AND embedding_dimensions=%s
                 ORDER BY score DESC NULLS LAST LIMIT %s''',
-                (vector,grade,subject,region,grade,phase_for(grade,region),include_graph,
+                (vector,selected,subject,region,selected,phases,include_graph,
                  scope.get('curriculum_version',''),scope.get('curriculum_version',''),
                  *[scope.get(k,'') for k in ('school_system','publisher','textbook_version','volume')]*2,
                  self.cfg.embedding_model,self.cfg.embedding_dimensions,limit*4)).fetchall()
@@ -207,6 +212,71 @@ class KnowledgeBase:
             ids=[n['id'] for n in nodes]
             edges=db.execute('SELECT * FROM kb_edges WHERE source_id=ANY(%s) AND target_id=ANY(%s) LIMIT 300',(ids,ids)).fetchall()
             return dict(nodes=nodes,edges=edges)
+
+    def target_curriculum(self, subject, grade, query='', region='上海', limit=60):
+        """Selectable graph nodes with only explicitly linked curriculum excerpts.
+
+        A graph label alone is not a curriculum requirement. No embeddings or LLM
+        requests are needed to browse the catalogue.
+        """
+        from .grades import GRADE_CODES, GRADE_NAMES, normalize_grades
+        code=GRADE_CODES.get(grade,grade)
+        phase=phase_for(grade,region)
+        with self.connect() as db:
+            nodes=db.execute('''SELECT id,name,source_id,grade_code,metadata FROM kb_nodes n
+                WHERE subject=%s AND (grade_code=%s OR
+                    (COALESCE(grade_code,'')='' AND phase IN (%s,%s,'')))
+                    AND (%s='' OR name ILIKE %s)
+                ORDER BY CASE WHEN name=%s THEN 0 ELSE 1 END,
+                    CASE WHEN EXISTS (SELECT 1 FROM kb_chunks c WHERE c.source_type='curriculum'
+                        AND c.subject=n.subject AND c.region IN (%s,'全国')
+                        AND (c.grades @> ARRAY[%s]::text[] OR (cardinality(c.grades)=0 AND c.phase IN (%s,'')))
+                        AND (c.knowledge_ids && ARRAY[n.id,n.source_id]::text[] OR c.labels @> ARRAY[n.name]::text[]))
+                    THEN 0 ELSE 1 END,name,id LIMIT %s''',
+                (subject,code,phase,'primary' if grade=='六年级' else phase,query,'%'+query+'%',query,region,grade,phase,limit)).fetchall()
+            if not nodes:
+                return []
+            aliases=list({key for n in nodes for key in (n['id'],n['id'].rsplit(':',1)[-1],n['source_id']) if key})
+            names=list({n['name'] for n in nodes})
+            chunks=db.execute('''SELECT content,knowledge_ids,labels,grades,metadata FROM kb_chunks
+                WHERE source_type='curriculum' AND subject=%s AND region IN (%s,'全国')
+                    AND (grades @> ARRAY[%s]::text[] OR (cardinality(grades)=0 AND phase IN (%s,'')))
+                    AND (knowledge_ids && %s::text[] OR labels && %s::text[])
+                ORDER BY document_id,id''',(subject,region,grade,phase,aliases,names)).fetchall()
+        result=[]
+        seen=set()
+        for node in nodes:
+            normalized=normalize_grades([node.get('grade_code') or ''])
+            point_grade=next((g for g in normalized if g in GRADE_NAMES.values()),'')
+            node_ids={node['id'],node['id'].rsplit(':',1)[-1],node['source_id']}-{None,''}
+            # National standards define stages, not textbook progress by year.
+            # A known stage may supply an excerpt for the selected target grade;
+            # never write that grade back to the source graph or clone entries.
+            stage_matches=[c for c in chunks if c.get('metadata',{}).get('grade_scope')=='stage'
+                and grade in c.get('grades',[])
+                and (node_ids.intersection(c['knowledge_ids']) or node['name'] in c['labels'])]
+            if not point_grade and stage_matches:
+                point_grade=grade
+            key=(node['name'],point_grade)
+            if key in seen:
+                continue
+            seen.add(key)
+            group=[n for n in nodes if n['name']==node['name'] and
+                ((normalize_grades([n.get('grade_code') or '']) or [''])[0]==point_grade
+                 or (stage_matches and not n.get('grade_code')))]
+            ids={key for n in group
+                for key in (n['id'],n['id'].rsplit(':',1)[-1],n['source_id'])}-{None,''}
+            linked=[c for c in chunks if (ids.intersection(c['knowledge_ids']) or node['name'] in c['labels'])
+                and (not c.get('grades') or point_grade in c['grades'])]
+            point=dict(knowledge_point=node['name'],
+                grade=point_grade,grade_source='knowledge_base' if point_grade else 'unknown',
+                curriculum_requirements=list(dict.fromkeys(c['content'].strip() for c in linked if c['content'].strip())))
+            sources=[dict(title=c['metadata'].get('title',''),source=c['metadata'].get('source',''),
+                page=c['metadata'].get('page'),printed_page=c['metadata'].get('printed_page'),
+                stage=c['metadata'].get('stage','')) for c in linked if c.get('metadata',{}).get('grade_scope')=='stage']
+            if sources:point['curriculum_sources']=sources
+            result.append(point)
+        return result
 
 
 def document_chunks(raw, suffix, size=900, overlap=120):

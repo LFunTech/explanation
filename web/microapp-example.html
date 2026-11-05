@@ -1,0 +1,34 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>课件微应用接入示例</title>
+<style>body{margin:0;padding:1rem;background:#f3f5ef;font:14px/1.6 system-ui;color:#244a37}form,.sample-row{display:flex;gap:.75rem;flex-wrap:wrap;align-items:center;margin-bottom:.75rem}input,select{flex:1;min-width:12rem;padding:.6rem;border:1px solid #cad8c5;border-radius:.4rem;background:#fff;color:inherit}button{padding:.6rem 1rem;cursor:pointer;border:1px solid #cad8c5;border-radius:.4rem;background:#fff;color:inherit}button:hover{background:#e9f0e4}#courseware{height:calc(100dvh - 12rem);min-height:25rem;border:1px solid #d9e2d4;background:white}#courseware:empty{display:grid;place-items:center}#courseware:empty:after{content:attr(data-placeholder);color:#809079;font-size:1rem;padding:2rem}#status{margin:.5rem 0;color:#6b8063}label{font-size:.8rem}#sample-title{color:#406b4b;font-size:.8rem}</style>
+<div class="sample-row"><label for="sample-lesson">库内示例课件</label><select id="sample-lesson" aria-label="选择示例课件"><option value="">正在读取课件库…</option></select><button id="refresh-samples" type="button">刷新示例</button><span id="sample-title"></span></div>
+<form id="loader"><label for="data-url">课件数据地址</label><input id="data-url" required placeholder="也可粘贴 result.microapp_data_url"><button id="load-button">挂载 / 切换课件</button><button id="unmount" type="button">卸载</button></form><div id="status" role="status">正在读取已完成课件…</div><div id="courseware" data-placeholder="正在从课件库载入示例…"></div>
+<script type="module">
+import {mount} from './courseware-microapp.js';
+let app,sampleRequest=0;const $=id=>document.getElementById(id),container=$('courseware'),status=$('status');
+const onEvent=event=>{if(event.type==='state')status.textContent=`第 ${event.payload.page+1} / ${event.payload.totalPages} 页 · 原生微应用`;else if(event.type==='error')status.textContent=event.payload.message;else if(event.type==='loading')status.textContent='正在加载课件…';else if(event.type==='unmounted')status.textContent='已卸载，可重新挂载或选择其他课件';};
+async function load(dataUrl){
+ $('data-url').value=dataUrl;container.dataset.placeholder='正在加载课件…';$('load-button').disabled=true;
+ try{if(app)await app.update({dataUrl});else app=await mount({container,dataUrl,onEvent});}
+ catch(error){status.textContent=error.message;container.dataset.placeholder='加载未完成，请重试或选择其他课件';}
+ finally{$('load-button').disabled=false;}
+}
+async function samples(autoLoad=false){
+ const ticket=++sampleRequest;$('refresh-samples').disabled=true;
+ try{
+  const response=await fetch('/api/courseware?status=completed&page_size=100',{credentials:'same-origin'});
+  if(!response.ok)throw new Error(response.status===401?'请先在工作台登录，再刷新示例；也可粘贴有效的数据地址':'暂时无法读取课件库，请点击刷新示例');
+  const data=await response.json();if(ticket!==sampleRequest)return;
+  const rows=data.items.flatMap(job=>job.items.map(item=>({item,title:job.title}))).filter(row=>row.item.result?.microapp_data_url);
+  const select=$('sample-lesson');select.replaceChildren(new Option(rows.length?'选择已完成课件':'课件库暂无已完成课件',''));
+  for(const {item,title} of rows)select.add(new Option(`${item.question.target_grade||item.question.grade||'未标注年级'} · ${title} · ${item.id.slice(0,8)}`,item.result.microapp_data_url));
+  if(autoLoad&&rows.length){select.selectedIndex=1;$('sample-title').textContent='直接使用库内已生成内容';await load(select.value);}
+  else if(autoLoad){status.textContent='课件库暂无已完成课件，可在工作台生成后刷新';container.dataset.placeholder='暂无可播放课件';}
+ }catch(error){if(autoLoad){status.textContent=error.message;container.dataset.placeholder=error.message;}$('sample-lesson').replaceChildren(new Option('暂时无法读取示例',''));}
+ finally{if(ticket===sampleRequest)$('refresh-samples').disabled=false;}
+}
+$('loader').onsubmit=event=>{event.preventDefault();sampleRequest++;$('refresh-samples').disabled=false;load($('data-url').value);};
+$('sample-lesson').onchange=()=>{if($('sample-lesson').value)load($('sample-lesson').value);};
+$('refresh-samples').onclick=()=>samples(!app);
+$('unmount').onclick=()=>{app?.unmount();app=null;container.dataset.placeholder='已卸载，点击挂载或选择其他课件继续';};
+const url=new URLSearchParams(location.search).get('dataUrl');if(url){load(url);samples(false);}else samples(true);
+</script></html>

@@ -9,7 +9,7 @@ def point(title, display, notes):
 
 
 SAMPLES = [
-    dict(question=Question(question_id='sample-math-001', stem='解方程：$x^2-5x+6=0$。请写出解题过程，并用代入法检验。',
+    dict(question=Question(question_id='sample-math-001', target_grade='九年级', stem='解方程：$x^2-5x+6=0$。请写出解题过程，并用代入法检验。',
                            knowledge_points=['一元二次方程', '因式分解'], answer='$x_1=2，x_2=3$').model_dump(),
          lesson=dict(title='从因式分解到方程的根', objective='理解零积原理，选择因式分解法求解，并养成验根习惯。',
              knowledge_points=[point('识别一元二次方程', '标准形式为 $ax^2+bx+c=0$，其中 $a\\ne0$。\n本题 $a=1$，$b=-5$，$c=6$。', '只含一个未知数，且未知数的最高次数为二的整式方程，叫做一元二次方程。先确认右边为零，再观察左边的结构。'),
@@ -22,7 +22,7 @@ SAMPLES = [
              summary=['先整理成右边为零的标准形式。', '分解因式后，令每个因式分别等于零。', '保留全部根，并代回原方程检验。'],
              variants=[dict(source='generated', question_id=None, stem='用因式分解法解方程：$x^2-7x+12=0$。', answer='$x=3$ 或 $x=4$。', analysis='因为 $-3+(-4)=-7$，$(-3)(-4)=12$，所以 $(x-3)(x-4)=0$，得到两个根。', knowledge_points=['因式分解']),
                        dict(source='generated', question_id=None, stem='解方程：$x^2-4x=0$，并解释为什么不能直接约去 $x$。', answer='$x=0$ 或 $x=4$。', analysis='提取公因式得 $x(x-4)=0$。直接约去 x 会丢失零根。', knowledge_points=['一元二次方程'])])),
-    dict(question=Question(question_id='sample-physics-001', subject='物理', stem='一个阻值为 $10\\,\\Omega$ 的定值电阻，两端电压为 $6\\,\\mathrm{V}$。求通过它的电流；若电压变为 $3\\,\\mathrm{V}$，电流是多少？假设温度不变。', knowledge_points=['欧姆定律'], answer='$0.6\\,\\mathrm{A}$；$0.3\\,\\mathrm{A}$。').model_dump(),
+    dict(question=Question(question_id='sample-physics-001', target_grade='九年级', subject='物理', stem='一个阻值为 $10\\,\\Omega$ 的定值电阻，两端电压为 $6\\,\\mathrm{V}$。求通过它的电流；若电压变为 $3\\,\\mathrm{V}$，电流是多少？假设温度不变。', knowledge_points=['欧姆定律'], answer='$0.6\\,\\mathrm{A}$；$0.3\\,\\mathrm{A}$。').model_dump(),
          lesson=dict(title='用欧姆定律建立电压与电流的联系', objective='理解定值电阻的电流、电压关系，并正确代入单位。',
              knowledge_points=[point('欧姆定律的适用条件', '$I=\\frac{U}{R}$\n同一导体、温度等条件不变时，电流与电压成正比。', '题目明确给出了定值电阻与温度不变，因此两次计算中的阻值相同。不要把这个关系无条件推广到所有元件。'),
                                point('统一物理量的单位', '电压 $U$ 用伏特（V）；电阻 $R$ 用欧姆（Ω）；电流 $I$ 用安培（A）。', '先写公式，再代入带有单位的量。这样可以检查有没有把电压、电阻的位置颠倒。')],
@@ -33,7 +33,7 @@ SAMPLES = [
              summary=['读清同一导体与温度不变的条件。', '按 I=U/R 计算，并注明单位。', '电阻不变时，用电流与电压成正比检验。'],
              variants=[dict(source='generated', question_id=None, stem='一个 $20\\,\\Omega$ 的定值电阻接在 6 V 电源两端，求电流。', answer='$0.3\\,\\mathrm{A}$。', analysis='$I=6/20=0.3\\,\\mathrm{A}$。', knowledge_points=['欧姆定律']),
                        dict(source='generated', question_id=None, stem='同一导体温度不变，电压由 2 V 增大至 4 V，初始电流为 0.1 A，求新的电流。', answer='$0.2\\,\\mathrm{A}$。', analysis='电阻不变时电流与电压成正比，电压加倍，电流也加倍。', knowledge_points=['欧姆定律'])])),
-    dict(question=Question(question_id='sample-chemistry-001', subject='化学', stem='在密闭容器中，4 g 氢气与 32 g 氧气恰好完全反应生成水。求生成水的质量，并说明依据。', knowledge_points=['质量守恒定律'], answer='36 g。', difficulty='基础').model_dump(),
+    dict(question=Question(question_id='sample-chemistry-001', target_grade='九年级', subject='化学', stem='在密闭容器中，4 g 氢气与 32 g 氧气恰好完全反应生成水。求生成水的质量，并说明依据。', knowledge_points=['质量守恒定律'], answer='36 g。', difficulty='基础').model_dump(),
          lesson=dict(title='在化学反应中追踪质量', objective='区分参加反应的质量与投入质量，用质量守恒定律求生成物质量。',
              knowledge_points=[point('质量守恒定律', '参加化学反应的各物质质量总和，等于反应后生成的各物质质量总和。', '化学反应前后，原子的种类和数目不变，因此总质量守恒。质量守恒并不意味着分子数目不变。'),
                                point('抓住“恰好完全反应”', '氢气与氧气均无剩余，生成物只有水。\n题目给出的 4 g 和 32 g 都是参加反应的质量。', '若一种物质过量，投入的总质量就不能直接全算作生成水的质量。本题明确恰好完全反应，因此可以直接相加。')],

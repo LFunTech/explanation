@@ -8,3 +8,6 @@ output/
 .playwright-cli/
 *.egg-info/
 .tmp/
+backups/
+deploy/runtime.env
+deploy/*.local.yaml

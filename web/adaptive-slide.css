@@ -1,0 +1,27 @@
+/* One rem follows the reader's root font size, including the slide canvas. */
+html{font-size:100%}
+.slide{padding:2.25rem 3.5rem 1.5rem}
+.slide h1{font-size:2.125rem;line-height:1.25;margin-bottom:1.125rem}
+.slide-body{--content-font-size:1.5rem;font-size:var(--content-font-size);line-height:1.48;overflow:hidden;white-space:normal}
+.slide-body.with-diagram{grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:1.5rem}
+.key-points{min-width:0}
+.key-point{margin:0 0 .38em;white-space:pre-wrap;overflow-wrap:anywhere}
+.key-point:last-child{margin-bottom:0}
+.slide-body .teaching-figure img{max-height:min(22.1875rem,calc(var(--body-height,28rem)*.75))}
+.teaching-figure figcaption{font-size:.875rem;line-height:1.4;margin-top:.5rem;overflow-wrap:anywhere}
+.slide-footer{margin-top:.875rem;padding-top:.625rem}
+.with-flow .step-flow,.with-flow.flow-dense .step-flow{gap:1.5rem 1.25rem}
+.with-flow .flow-step,.with-flow.flow-dense .flow-step{padding:.75rem .875rem;gap:.625rem;grid-template-columns:2rem minmax(0,1fr)}
+.with-flow .flow-step h2,.with-flow.flow-dense .flow-step h2{font-size:.92em;line-height:1.35;margin-bottom:.35em}
+.with-flow .flow-step>div>div,.with-flow.flow-dense .flow-step>div>div{font-size:1em;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}
+.with-flow .flow-number{width:1.875rem;height:1.875rem;font-size:.8125rem}
+.slide-body .katex{font-size:1.04em}
+.slide-body .katex-display{margin:.25em 0}
+.compact-slide #stage{height:var(--original-stage-height);min-height:0;overflow:hidden;padding:1.25rem 1.375rem 1rem}
+.compact-slide #slide-viewport{overflow:hidden}
+.compact-slide .slide h1{font-size:1.5rem;margin-bottom:.75rem}
+.compact-slide .slide-body{font-size:var(--content-font-size,1.125rem);line-height:1.48;overflow:hidden}
+.compact-slide .slide-body.with-diagram{gap:.75rem}
+.compact-slide .with-flow .flow-step h2{font-size:.95em}
+.compact-slide .with-flow .flow-step>div>div{font-size:1em;line-height:1.45}
+@media print{.slide-body{font-size:1.125rem;line-height:1.4}.slide h1{font-size:1.6875rem}}

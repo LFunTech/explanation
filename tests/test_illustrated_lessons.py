@@ -55,25 +55,28 @@ def test_number_line_exact_endpoints_and_safe_labels():
         assert len(image.getcolors(2_000_000))>2
 
 
-def test_diagram_rejects_wrong_coordinates_and_endpoints():
+def test_diagram_rejects_unrenderable_data_but_allows_free_points():
     spec=number_line();spec['intervals'][0]['end_closed']=True
     with pytest.raises(ValidationError,match='无穷端点'):NumberLine.model_validate(spec)
     spec=number_line();spec['minimum']=float('nan')
     with pytest.raises(ValidationError):NumberLine.model_validate(spec)
-    with pytest.raises(ValidationError,match='不在所给函数曲线上'):
-        Cartesian.model_validate(dict(kind='cartesian',caption='直线',alt='直线',x_min=-1,x_max=3,y_min=-1,y_max=5,
-            curves=[dict(coefficients=[0,2,0],label='y=2x')],points=[dict(x=1,y=3,label='错误点')]))
+    point=Cartesian.model_validate(dict(kind='cartesian',caption='直线与动点',alt='直线与动点',x_min=-1,x_max=3,y_min=-1,y_max=5,
+        curves=[dict(coefficients=[0,2,0],label='y=2x')],points=[dict(x=1,y=3,label='M')])).points[0]
+    assert (point.x,point.y)==(1,3)
     with pytest.raises(ValidationError,match='引用无效'):
         Geometry.model_validate(dict(kind='geometry',caption='三角形',alt='三角形',vertices=[dict(id='A',x=1,y=1)],segments=[dict(start='A',end='B')]))
 
 
-def test_lecture_limits_and_coverage_are_not_silently_truncated():
-    draft=lesson();draft['pages']+=copy.deepcopy(draft['pages'][1:3])
-    with pytest.raises(ValidationError,match='最多 5 页'):IllustratedLesson.model_validate(draft)
-    draft=lesson();draft['pages'][1]['knowledge_indices']=[]
-    with pytest.raises(ValidationError,match='覆盖所有'):IllustratedLesson.model_validate(draft)
-    draft=lesson();draft['pages'][1]['narration']='解释'*220
-    with pytest.raises(ValidationError,match='420'):IllustratedLesson.model_validate(draft)
+def test_content_counts_and_narration_do_not_block_presentation():
+    draft=lesson();draft['pages']+=copy.deepcopy(draft['pages'][1:3])*6
+    assert len(IllustratedLesson.model_validate(draft).pages)==16
+    draft=lesson();draft['pages'][1]['knowledge_indices']=[0,0,99,-1]
+    assert IllustratedLesson.model_validate(draft).pages[1].knowledge_indices==[0]
+    draft['pages'][2]['solution_indices']=[]
+    result=IllustratedLesson.model_validate(draft)
+    assert any(p.solution_indices==[0] for p in result.pages)
+    draft['pages'][1]['narration']='解释'*1000
+    assert IllustratedLesson.model_validate(draft).pages[1].narration=='解释'*1000
     assert plain_text('$x\\geq-1$，$x\\leq2$')=='x大于等于-1，x小于等于2'
 
 
@@ -97,24 +100,20 @@ def test_generated_variant_requires_self_contained_question():
 
 
 @pytest.mark.asyncio
-async def test_actual_audio_budget_rewrites_and_never_reuses_stale_audio(tmp_path):
+async def test_long_audio_is_exported_without_rewriting_or_duration_limit(tmp_path):
     store,engine,cfg=setup(tmp_path);cfg.tts_mode='qwen'
-    question=Question(question_id='line-test',stem=r'把 $x+1\geq0$ 的解集表示在数轴上。',difficulty='基础')
+    question=Question(question_id='line-test',stem=r'把 $x+1\geq0$ 的解集表示在数轴上。',difficulty='基础',target_grade='七年级')
     req=JobRequest(assignment_id='illustration',questions=[question],options=dict(mode='qwen',variant_count=0))
     job,_=store.create_job(req)
     class FakeQwen:
         calls=0
         speech_calls=0
-        async def lesson(self,question,resources,options,progress,feedback=None,checkpoint=None):
+        async def lesson(self,question,resources,options,progress,feedback=None,checkpoint=None,**kwargs):
             self.calls+=1
             result=lesson()
             result['solution_steps']+=[dict(title='确定端点',display='−1 处画实心点。',notes='代入边界满足原式。',narration='边界负一满足原式，所以用实心点。'),
                                        dict(title='确定方向',display='向右延伸。',notes='数轴上右侧的数较大。',narration='向右表示所有比负一大的数。')]
             result['pages'][2]['solution_indices']=[0,1,2]
-            if self.calls>1:
-                assert '120' in feedback
-                for p in result['pages']:p['narration']='精简讲解：'+p['narration']
-                for step in result['solution_steps']:step['narration']='精简讲解：'+step['narration']
             return result,dict(passed=True)
         async def speech(self,text):
             self.speech_calls+=1
@@ -128,12 +127,13 @@ async def test_actual_audio_budget_rewrites_and_never_reuses_stale_audio(tmp_pat
     item=store.job(job)['items'][0];assert item['status']=='completed'
     package=tmp_path/'packages'/item['package_id']
     manifest=json.loads((package/'manifest.json').read_text(encoding='utf-8'))
-    assert engine.qwen.calls==2 and engine.qwen.speech_calls==12
-    assert manifest['quality']['audio_duration_seconds']==120
+    assert engine.qwen.calls==1 and engine.qwen.speech_calls==6
+    assert manifest['quality']['audio_duration_seconds']==210
+    assert manifest['quality']['duration_limit_seconds'] is None
     assert manifest['quality']['diagram_count']==1 and manifest['slide_count']==4
     assert len(list((package/'audio').glob('*.wav')))==4
     slides=json.loads((package/'slides.json').read_text(encoding='utf-8'))
-    assert slides[2]['cues']==[dict(node=i,start_seconds=i*20,end_seconds=(i+1)*20) for i in range(3)]
+    assert slides[2]['cues']==[dict(node=i,start_seconds=i*35,end_seconds=(i+1)*35) for i in range(3)]
     with zipfile.ZipFile(package/'package.zip') as archive:
         assert 'figures/page-002.svg' in archive.namelist()
         assert 'figures/page-002.png' in archive.namelist()

@@ -1,0 +1,37 @@
+:root{font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;font-size:100%;color:#203e34;background:#fff}*{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden}button{font:inherit;color:inherit;cursor:pointer}button:focus-visible{outline:.1875rem solid #7aa88d;outline-offset:.125rem}
+#slide-viewport{display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;background:#fff}#slide-mount{position:relative;flex:none;min-width:0;min-height:0;aspect-ratio:16/9;overflow:hidden}#stage{position:absolute;left:0;top:0;width:80rem;height:45rem;padding:2.75rem 3.5rem 1.25rem;transform-origin:top left;overflow:hidden}
+.slide{display:flex;flex-direction:column;background:white;min-width:0;min-height:0}.slide-kicker{font-size:.8125rem;font-weight:600;letter-spacing:.125rem;color:#5f8269;margin-bottom:.75rem}.slide-heading{display:flex;align-items:start;gap:1rem;flex-shrink:0}.slide h1{flex:1;min-width:0;font-size:2.125rem;line-height:1.25;font-weight:650;margin:0 0 1.125rem}.flow-figure-button{padding:.4375rem .625rem;font-size:.8125rem;border:.0625rem solid #d5ded6;background:#fff;border-radius:.375rem}
+.slide-body{--content-font-size:1.5rem;font-size:var(--content-font-size);line-height:1.48;flex:1;min-height:0;min-width:0;overflow:hidden;overflow-wrap:anywhere}.slide-body.with-diagram{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:1.5rem;align-items:center}.key-points{min-width:0}.key-point{margin:0 0 .38em;white-space:pre-wrap}.key-point:last-child{margin-bottom:0}.slide-body img{display:block;max-width:100%;object-fit:contain;margin:auto}.slide-body .katex{font-size:1.04em}.slide-body .katex-display{margin:.25em 0;max-width:100%;overflow-x:auto;overflow-y:hidden}
+.teaching-figure{margin:0;min-width:0}.diagram-zoom{display:block;border:0;background:transparent;padding:0;width:100%}.teaching-figure img{width:100%;height:auto;max-height:min(22.1875rem,calc(var(--body-height,28rem)*.75))}.teaching-figure figcaption{font-size:.875rem;line-height:1.4;margin-top:.5rem;color:#526b58;white-space:pre-wrap;overflow-wrap:anywhere}.slide-footer{display:flex;justify-content:space-between;gap:1rem;flex-shrink:0;border-top:.0625rem solid #e2e9df;margin-top:.875rem;padding-top:.625rem;font-size:.75rem;line-height:1.3;color:#7c8c7e}.kind-答案 .slide-body{color:#2e704f}
+.slide-body.with-flow{padding:.1875rem}.slide-body.with-flow.with-diagram{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);align-items:start}.flow-chart{position:relative;min-width:0}.flow-connectors{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}.step-flow{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1.5rem 1.25rem}.step-flow.flow-count-1{grid-template-columns:minmax(0,1fr)}.flow-step{display:grid;align-content:start;grid-template-columns:2rem minmax(0,1fr);padding:.75rem .875rem;gap:.625rem;min-width:0;background:#eff5e8;border:.0625rem solid #c8d9bf;border-radius:.75rem}.flow-number{display:grid;place-items:center;align-self:start;width:1.875rem;height:1.875rem;border-radius:50%;background:#dce9d3;color:#507b50;font-size:.8125rem;font-weight:700}.flow-step h2{font-size:.92em;line-height:1.35;margin:0 0 .35em;color:#306347}.flow-step>div>div{font-size:1em;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}.flow-step.is-current{background:#e1efd5;border-color:#48804b;box-shadow:0 0 0 .1875rem #8ebd6d26}.flow-step.is-current .flow-number{background:#2d7048;color:white}.flow-step.is-complete{background:#f3f7ee;border-color:#adc5a6}
+.slide-body.with-original{display:block}
+/* One visual system for every slide, independent of the embedding viewport. */
+#stage{padding:3rem 3.75rem 1.5rem}
+.slide-kicker{font-size:1rem;letter-spacing:.16rem;margin-bottom:.75rem}
+.slide h1{font-size:3.25rem;line-height:1.22;letter-spacing:-.04em;margin-bottom:1.5rem}
+.slide-footer{font-size:.875rem;padding-top:.8rem;margin-top:1.25rem}
+.teaching-figure figcaption{font-size:1.125rem;line-height:1.5;margin-top:.75rem}
+.slide-body{line-height:1.55}
+.slide-body .katex-display,.slide-body .katex-html{overflow:visible}
+.slide-body.sparse-content:not(.with-diagram){display:flex;flex-direction:column;justify-content:center}
+.slide-body.balanced-content:not(.with-original):not(.with-diagram){display:flex;flex-direction:column;justify-content:center}
+.sparse-content>.flow-chart,.sparse-content>.key-points,.sparse-content>.question-document{width:100%;align-self:center}
+.sparse-content:not(.with-diagram)>.key-points{padding:2rem 2.25rem;border-left:.25rem solid #7d9f81;border-radius:.25rem .875rem .875rem .25rem;background:#f5f8f1}
+.key-point{margin-bottom:.5em}
+.flow-step{grid-template-columns:2.5rem minmax(0,1fr);padding:1.5rem 1.75rem;gap:1rem;background:#f3f7ee;border-color:#d5e1cd;border-radius:1rem}
+.flow-number{font-size:1rem;width:2.5rem;height:2.5rem;background:#e1ecd8}
+.flow-step h2{font-size:1.875rem;font-weight:600;margin:0 0 1rem;color:#58775e}
+.step-flow.flow-count-1 .flow-step{min-height:12rem;align-content:center}
+.kind-答案 .sparse-content>.key-points{border-color:#397454;background:#eff6ec}
+.slide-body.with-original .question-document{line-height:1.5}
+.slide-body.with-original .q-choices{margin-top:1.75rem;gap:1rem 1.25rem}
+.slide-body.with-original .q-choice{padding:1rem 1.25rem;gap:.75rem;border-radius:.75rem;background:#f7faf5;border-color:#dce6d7;align-items:center}
+.slide-body.with-original .q-choice-label{font-size:.85em}
+.slide-body.with-diagram>:only-child{grid-column:1 / -1}
+.concept-flow{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1.5rem;width:100%}
+.concept-flow .concept-step{display:flex;align-items:center;gap:1rem;min-width:0;margin:0;padding:1.75rem 1.5rem;background:#f4f8ef;border:.0625rem solid #d8e3d0;border-radius:.875rem}
+.concept-index{flex:none;display:grid;place-items:center;width:2.5rem;height:2.5rem;font-size:1rem;font-weight:650;color:#557758;background:#e1ecd8;border-radius:50%}
+.motion-enabled .flow-step{transition:background-color .25s ease,border-color .25s ease,box-shadow .25s ease}.motion-enabled .flow-number{transition:background-color .25s ease,color .25s ease}
+@media(prefers-reduced-motion:reduce){.motion-enabled .flow-step,.motion-enabled .flow-number{transition:none}}
+#figure-dialog{border:.0625rem solid #dae5d5;border-radius:.75rem;padding:1.25rem;max-width:94vw;max-height:90vh;color:#254b3c}#figure-dialog::backdrop{background:#183629a8}#figure-dialog img{display:block;max-width:100%;max-height:70vh;margin:.9375rem auto;object-fit:contain}#figure-dialog p{font-size:.875rem;line-height:1.8}#figure-close{display:block;margin-left:auto;border:.0625rem solid #d5ded6;background:#fff;border-radius:.375rem;padding:.5rem .75rem}#print-pages{display:none}
+@media print{html,body{height:auto;overflow:visible}#slide-viewport,dialog{display:none!important}#print-pages{display:block}.slide{width:100%;height:calc((100vw - 16mm)*.5625);padding:1.625rem 2.375rem;break-after:page;page-break-after:always;overflow:hidden}.slide h1{font-size:1.6875rem}.slide-body{--content-font-size:1.125rem}@page{size:landscape;margin:8mm}}

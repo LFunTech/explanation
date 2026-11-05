@@ -1,0 +1,51 @@
+/* The host fills the viewport; the embedded lesson owns its 16:9 canvas. */
+html,body{height:100%;height:100dvh}
+body{background:#f3f5f1}
+.player-header{height:3.75rem;flex-basis:3.75rem;padding:0 1.25rem;border-bottom:.0625rem solid #e3e8e1;background:#fff;gap:1rem}
+.player-header>div:first-child{flex:1;min-width:0;gap:.625rem}
+.player-header strong{font-size:.875rem;max-width:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.player-header>div:last-child{flex-shrink:0;gap:.5rem}
+.embedded-player .player-header{padding-right:4rem}
+.player-header button{border-radius:.5rem;padding:.5rem .75rem}
+#outline-toggle[aria-expanded=true]{background:#edf4ee;border-color:#c9dacb;color:#285c43}
+.player-layout{position:relative;display:flex;gap:0;padding:0;margin:0;overflow:hidden}
+#outline-panel{display:none;flex:0 0 16rem;width:16rem;min-width:0;min-height:0;flex-direction:column;background:#f8faf7;border-right:.0625rem solid #e0e7df}
+.outline-visible #outline-panel{display:flex}
+.outline-heading{display:flex;align-items:center;gap:.625rem;padding:1.125rem 1rem .875rem 1.25rem}
+.outline-heading>strong{flex:1}
+.outline-heading strong{font-size:.8125rem;font-weight:650;color:#345440}
+.outline-heading>span{font-size:.6875rem;color:#7e8e80;background:#eaf0e7;padding:.125rem .5rem;border-radius:1rem}
+#outline-close{display:grid;place-items:center;width:1.625rem;height:1.625rem;padding:0;border:0;border-radius:.375rem;background:transparent;color:#6c8370;font-size:1.5rem;line-height:1}
+#outline-close:hover{background:#e7eee4;color:#264d38}
+#outline{display:block;position:static;flex:1;min-height:0;width:100%;max-height:none;overflow-y:auto;overscroll-behavior:contain;padding:0 .625rem .75rem;scrollbar-width:thin;scrollbar-color:#c8d4c7 transparent}
+#outline button{position:relative;display:grid;grid-template-columns:1.625rem minmax(0,1fr);align-items:start;gap:.625rem;margin:0 0 .25rem;padding:.75rem .625rem;border:.0625rem solid transparent;border-radius:.625rem;font-size:.8125rem;line-height:1.55;font-weight:400;color:#55665b;transition:background .15s,border-color .15s}
+#outline button:hover{background:#edf2eb;color:#254f39}
+#outline button.active{background:#e6f0e6;border-color:#d4e4d4;color:#204d37;font-weight:650}
+#outline button.active::before{content:'';position:absolute;left:-.0625rem;top:.875rem;bottom:.875rem;width:.1875rem;border-radius:.1875rem;background:#397759}
+#outline button .outline-number{display:grid;place-items:center;height:1.5rem;background:#edf1e9;color:#7b8c7d;border-radius:.375rem;font-size:.6875rem;line-height:1;font-weight:500;font-variant-numeric:tabular-nums}
+#outline button.active .outline-number{background:#356b50;color:#fff}
+.outline-label{min-width:0;overflow-wrap:anywhere}
+#outline-backdrop{display:none}
+.stage-wrap{position:relative;display:flex;align-items:center;justify-content:center;padding:1rem;min-width:0;min-height:0;max-width:none;background:#fff}
+.player-controls{height:4rem;flex-basis:4rem;gap:1rem;border-top:.0625rem solid #e3e8e1}
+.player-controls button{border-radius:.5rem}
+@media(max-width:63.999rem){
+ #outline-panel{position:absolute;inset:0 auto 0 0;z-index:7;width:min(19rem,85vw);box-shadow:.5rem 0 2rem #1f3e3820;border-right:0}
+ .outline-visible #outline-backdrop{display:block;position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;border-radius:0;background:#203a3640;backdrop-filter:blur(.125rem);z-index:6}
+ .stage-wrap{padding:.75rem}
+}
+@media(max-width:43.75rem){
+ .player-header{padding:0 .75rem;height:3.5rem;flex-basis:3.5rem;gap:.5rem}
+ .embedded-player .player-header{padding-right:3.25rem}
+ .player-header strong{font-size:.8125rem;max-width:none}
+ .player-header>div:last-child{gap:.25rem}
+ .player-header button,.player-header #reading-jump{font-size:.6875rem;padding:.4375rem .5rem}
+ .stage-wrap{padding:.5rem}
+ .player-controls{gap:.5rem;flex-basis:3.75rem;height:3.75rem}
+ .player-controls button{font-size:.75rem;padding:.5rem .625rem}
+}
+@media print{html,body{height:auto}.player-header,.player-layout,.player-controls{display:none!important}}
+
+#lesson-content{display:block;flex:none;min-width:0;width:100%;height:100%;border:.0625rem solid #dfe5de;background:#fff;box-shadow:0 .25rem 1rem #203e3414}
+#content-status{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);max-width:85%;padding:1rem 1.5rem;text-align:center;background:#fff;color:#6b7e71;font-size:.875rem;line-height:1.8}
+#content-status button{margin:.5rem auto 0;padding:.375rem .75rem;border:.0625rem solid #dfe5de;border-radius:.375rem;background:#fff;font:inherit;color:#315942}

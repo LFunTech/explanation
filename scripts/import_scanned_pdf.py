@@ -26,6 +26,7 @@ async def main():
     parser.add_argument('--model',default='qwen3-vl-plus')
     parser.add_argument('--concurrency',type=int,choices=range(1,5),default=4)
     parser.add_argument('--embed',action='store_true')
+    parser.add_argument('--extract-only',action='store_true',help='仅完成逐页 OCR 缓存，供跨学段文档分段核对后入库')
     args=parser.parse_args()
     cfg=Settings()
     if not cfg.dashscope_api_key:
@@ -86,6 +87,10 @@ async def main():
             chunks.extend(parts)
     if not chunks:
         raise SystemExit('整本文件未提取到文字，未写入知识库')
+    if args.extract_only:
+        print(json.dumps(dict(pages=len(pages),chunks=len(chunks),cache=str(cache),pdf_sha256=checksum),ensure_ascii=False),flush=True)
+        pdf.close()
+        return
     kb=KnowledgeBase(cfg)
     kb.initialize()
     identifier='curriculum-'+checksum[:20]+'-'+args.phase

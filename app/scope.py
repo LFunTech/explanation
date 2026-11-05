@@ -46,5 +46,9 @@ def validate_document_metadata(meta):
 
 
 def generation_question(question):
+    from .teaching import teaching_question
+    question=teaching_question(question)
     # Empty new selectors should not invalidate already reviewed content.
-    return {k:v for k,v in question.model_dump().items() if k not in SCOPE_FIELDS or v}
+    data={k:v for k,v in question.model_dump().items() if k not in (*SCOPE_FIELDS,'source_grades') or v}
+    if data.get('grades') in ([],[data['grade']]):data.pop('grades',None)
+    return data

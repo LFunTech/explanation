@@ -2,6 +2,9 @@
 import html
 import json
 import re
+import queue
+import threading
+import time
 from contextlib import contextmanager
 from html.parser import HTMLParser
 
@@ -10,14 +13,30 @@ from pydantic import ValidationError
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from .kb import phase_for
 from .exam_storage import ExamImageStorage
 from .models import Question
 from .providers import GenerationError
+from .grades import GRADE_NAMES, GRADE_CODES, normalize_grades
+from .question_layout import question_layout
+from .exam_cache import ExamCache
 
 
 SUBJECTS = {'GB-MTH':'数学','GB-PHY':'物理','GB-CHE':'化学','GB-BIO':'生物','GB-SCI':'科学',
             'GB-CHN':'语文','GB-FLG':'英语','GB-HIS':'历史','GB-GEO':'地理','GB-MRL':'道德与法治'}
+
+
+def public_grades(row):
+    """Use the public question's own codes, without a tenant grade dictionary."""
+    codes=list(dict.fromkeys([*(row.get('grade_codes') or []),row.get('grade_code')]))
+    return [GRADE_NAMES.get(code,code) for code in codes if code]
+
+
+def apply_public_grades(question, grades, *, preserve_selection=False):
+    question.source_grades=normalize_grades(grades)
+    if not preserve_selection or not question.grades:
+        question.grades=list(question.source_grades)
+    # A search/default grade is never evidence of the source question's grade.
+    question.grade=next(iter(question.grades),'')
 
 
 class PlainHTML(HTMLParser):
@@ -98,6 +117,8 @@ def parse_stem(value):
 
 
 class Exam:
+    _pools={}
+    _pool_lock=threading.Lock()
     def __init__(self,settings):
         self.cfg=settings
 
@@ -105,41 +126,81 @@ class Exam:
     def connect(self):
         if not self.cfg.exam_db_host:
             raise GenerationError('exam_not_configured','尚未配置 exam 题库连接。')
-        with psycopg.connect(host=self.cfg.exam_db_host,port=self.cfg.exam_db_port,
-            dbname=self.cfg.exam_db_name,user=self.cfg.exam_db_user,password=self.cfg.exam_db_password,
-            connect_timeout=8,options='-c default_transaction_read_only=on -c statement_timeout=20000',
-            row_factory=dict_row) as db:
-            yield db
+        key=(self.cfg.exam_db_host,self.cfg.exam_db_port,self.cfg.exam_db_name,self.cfg.exam_db_user,self.cfg.exam_db_password)
+        with self._pool_lock:
+            pool=self._pools.setdefault(key,queue.LifoQueue(maxsize=4))
+        db=None
+        for attempt in range(3):
+            try:
+                try:db=pool.get_nowait()
+                except queue.Empty:
+                    db=psycopg.connect(host=self.cfg.exam_db_host,port=self.cfg.exam_db_port,
+                        dbname=self.cfg.exam_db_name,user=self.cfg.exam_db_user,password=self.cfg.exam_db_password,
+                        connect_timeout=12,options='-c default_transaction_read_only=on -c statement_timeout=20000',
+                        keepalives=1,keepalives_idle=15,keepalives_interval=5,keepalives_count=3,
+                        row_factory=dict_row,autocommit=True)
+                db.execute('SELECT 1')
+                break
+            except (psycopg.OperationalError,psycopg.InterfaceError) as error:
+                if db is not None:db.close();db=None
+                if getattr(error,'sqlstate',None) in {'28P01','28000'}:
+                    raise GenerationError('exam_configuration','题库连接配置不可用，请联系管理员检查。') from None
+                if attempt==2:
+                    raise GenerationError('exam_unavailable','题库连接暂时中断，已自动重连，请稍后重试。') from None
+                time.sleep(.3*(attempt+1))
+        try:
+            # Every caller gets a separate read-only transaction; idle connections
+            # are reused so checking several grades does not repeat TCP handshakes.
+            with db.transaction():yield db
+        except (psycopg.OperationalError,psycopg.InterfaceError):
+            db.close()
+            raise GenerationError('exam_unavailable','题库读取时连接中断，请重试当前操作。') from None
+        finally:
+            if db is not None and not db.closed:
+                try:pool.put_nowait(db)
+                except queue.Full:db.close()
 
-    def search(self,subject='数学',grade='九年级',query='',limit=12,knowledge_ids=None,exclude_id=None,
-               *,randomize=False,exclude_ids=None,region='上海'):
+    @classmethod
+    def close_connections(cls):
+        with cls._pool_lock:
+            for pool in cls._pools.values():
+                while not pool.empty():
+                    try:pool.get_nowait().close()
+                    except queue.Empty:break
+            cls._pools.clear()
+
+    def search(self,subject='数学',grade='',query='',limit=12,knowledge_ids=None,exclude_id=None,
+               *,randomize=False,exclude_ids=None,region='上海',school_system='',grades=None,question_id=None):
         code=next((k for k,v in SUBJECTS.items() if v==subject),'')
-        phase=phase_for(grade,region)
+        selected_grades=normalize_grades(grades if grades is not None else [grade])
+        grade_codes=[GRADE_CODES.get(g,g) for g in selected_grades]
         ids=[v.removeprefix('exam:public:') for v in (knowledge_ids or [])]
         excluded=[v.removeprefix('exam:public:') for v in (exclude_ids or [])]
         order='random()' if randomize else 'q.updated_at DESC,q.id'
         with self.connect() as db:
-            # 精确年级来自题目标签；无标签只返回同学段，并在 UI 明示待核对。
+            # Both the source and grade filter stay inside the exam public schema.
             rows=db.execute('''SELECT q.id::text,q.stem,q.answer,q.analysis,q.question_type,q.difficulty,
-                    q.subject_code,q.source_schema,q.source_question_id,q.content_revision,
+                    q.subject_code,q.source_schema,q.source_question_id,q.content_revision,q.grade_code,
                     COALESCE((SELECT array_agg(k.knowledge_point_name ORDER BY r.sort_order) FROM public.question_taxonomy_relation r
                         JOIN public.knowledge_point k ON k.id=r.knowledge_point_id WHERE r.question_id=q.id AND k.effective_enabled),'{}') AS labels,
                     COALESCE((SELECT array_agg(k.id::text ORDER BY r.sort_order) FROM public.question_taxonomy_relation r
                         JOIN public.knowledge_point k ON k.id=r.knowledge_point_id WHERE r.question_id=q.id AND k.effective_enabled),'{}') AS knowledge_ids,
-                    COALESCE((SELECT array_agg(DISTINCT g.grade_name) FROM public.question_grade qg
-                        JOIN tenant_kg.grade g ON g.grade_code=qg.grade_code WHERE qg.question_id=q.id),'{}') AS grades,
+                    COALESCE((SELECT array_agg(qg.grade_code ORDER BY qg.sort_order,qg.grade_code)
+                        FROM public.question_grade qg WHERE qg.question_id=q.id),'{}') AS grade_codes,
                     EXISTS(SELECT 1 FROM public.question_attachment a WHERE a.question_id=q.id
                         AND upper(COALESCE(a.usage_type,'MATERIAL')) NOT IN ('ANSWER','ANALYSIS','SOLUTION')) AS has_attachments
-                FROM public.question q WHERE q.status='ACTIVE' AND q.subject_code=%s
+                FROM public.question q WHERE q.status='ACTIVE' AND (%s::boolean OR q.subject_code=%s)
+                    AND (%s::text IS NULL OR q.id::text=%s)
                     AND (%s='' OR q.stem ILIKE %s OR EXISTS(SELECT 1 FROM public.question_taxonomy_relation r
                         JOIN public.knowledge_point k ON k.id=r.knowledge_point_id WHERE r.question_id=q.id AND k.knowledge_point_name ILIKE %s))
                     AND (%s::text[]='{}' OR EXISTS(SELECT 1 FROM public.question_taxonomy_relation r WHERE r.question_id=q.id AND r.knowledge_point_id::text=ANY(%s)))
                     AND (%s::text IS NULL OR q.id::text<>%s)
                     AND NOT(q.id::text=ANY(%s::text[]))
-                    AND EXISTS(SELECT 1 FROM public.question_taxonomy_relation r JOIN public.knowledge_point k ON k.id=r.knowledge_point_id
-                        WHERE r.question_id=q.id AND k.phase=%s AND k.effective_enabled)
+                    AND (%s::text[]='{}' OR q.grade_code=ANY(%s::text[]) OR EXISTS(SELECT 1 FROM public.question_grade qg
+                        WHERE qg.question_id=q.id AND qg.grade_code=ANY(%s::text[])))
                 ORDER BY '''+order+''' LIMIT %s''',
-                (code,query,'%'+query+'%','%'+query+'%',ids,ids,exclude_id,exclude_id,excluded,phase,limit*3)).fetchall()
+                (question_id is not None,code,question_id,question_id,query,'%'+query+'%','%'+query+'%',ids,ids,exclude_id,exclude_id,excluded,
+                    grade_codes,grade_codes,grade_codes,limit*3)).fetchall()
         result=[]
         for row in rows:
             parsed=parse_stem(row['stem'])
@@ -147,17 +208,18 @@ class Exam:
             row['has_attachments']=row['has_attachments'] or parsed['requires_images']
             row['answer'],_=plain(row['answer'])
             row['analysis'],_=plain(row['analysis'])
-            row['grade_scope']='题库年级' if row['grades'] else '仅学段，年级待核对'
-            # 上海五四与源六三年级不做隐式等价映射。
+            row['grades']=public_grades(row)
+            row['grade_scope']='题库年级' if row['grades'] else '题库未标注年级'
             try:
-                question=Question(question_id='exam:public:'+row['id'],stem=row['stem'],subject=subject,
-                grade=grade,region=region,knowledge_points=list(dict.fromkeys(row['labels']))[:20],
+                question=Question(question_id='exam:public:'+row['id'],stem=row['stem'],subject=SUBJECTS.get(row['subject_code'],subject),
+                grades=row['grades'],region=region,knowledge_points=list(dict.fromkeys(row['labels']))[:20],
                 options=parsed['options'],sub_questions=parsed['sub_questions'],
                 knowledge_point_ids=list(dict.fromkeys(row['knowledge_ids']))[:20],
                 question_type={'SINGLE_CHOICE':'单选题','MULTIPLE_CHOICE':'多选题','FILL_BLANK':'填空题','SHORT_ANSWER':'解答题'}.get(row['question_type'],'解答题'),
                 difficulty={'EASY':'基础','RELATIVELY_EASY':'基础','NORMAL':'中等','HARD':'较难','VERY_HARD':'较难'}.get(row['difficulty'],'中等'),
                 answer=row['answer'],analysis=row['analysis'],source='exam/public/question/'+row['id'],
                     requires_images=bool(row['image_urls'] or row['has_attachments']))
+                apply_public_grades(question,row['grades'])
             except ValidationError:
                 # 空题干、重复小题或超过单题容量的源记录不阻断整个检索结果。
                 continue
@@ -165,16 +227,43 @@ class Exam:
             result.append(row)
             if len(result)>=limit:
                 break
+        if self.cfg.exam_db_host:
+            ExamCache(self.cfg).put(result)
         return result
 
-    def random_questions(self,subject='数学',grade='九年级',region='上海',limit=3,exclude_ids=None):
-        rows=self.search(subject,grade,limit=limit,randomize=True,exclude_ids=exclude_ids,region=region)
+    def question(self, question_id):
+        """Load one complete, active public question by its canonical ID."""
+        from uuid import UUID
+        try:question_id=str(UUID(question_id.removeprefix('exam:public:')))
+        except ValueError:raise GenerationError('exam_question_missing','题库题目标识无效。') from None
+        rows=self.search(subject='',limit=1,question_id=question_id)
+        if not rows:
+            raise GenerationError('exam_question_missing','题库题目不存在、已停用或内容不完整。')
+        return Question.model_validate(rows[0]['question'])
+
+    def random_questions(self,subject='数学',grade='',region='上海',limit=3,exclude_ids=None,*,grades=None):
+        rows=self.search(subject,grade,limit=limit,randomize=True,exclude_ids=exclude_ids,region=region,grades=grades)
         # 小题库不足一批时允许补回旧题，但同一批不重复。
         if len(rows)<limit and exclude_ids:
             extra=self.search(subject,grade,limit=limit-len(rows),randomize=True,
-                exclude_ids=[row['id'] for row in rows],region=region)
+                exclude_ids=[row['id'] for row in rows],region=region,grades=grades)
             rows.extend(extra)
         return rows
+
+    def question_metadata(self,question_ids):
+        """Resolve canonical public grades for submissions and existing courseware."""
+        from uuid import UUID
+        ids=[]
+        for value in question_ids:
+            try:ids.append(str(UUID(value.removeprefix('exam:public:'))))
+            except ValueError:continue
+        if not ids:return {}
+        with self.connect() as db:
+            rows=db.execute('''SELECT q.id::text,q.grade_code,
+                COALESCE((SELECT array_agg(qg.grade_code ORDER BY qg.sort_order,qg.grade_code)
+                    FROM public.question_grade qg WHERE qg.question_id=q.id),'{}') AS grade_codes
+                FROM public.question q WHERE q.id::text=ANY(%s) AND q.status='ACTIVE' ''',(ids,)).fetchall()
+        return {'exam:public:'+r['id']:dict(grades=public_grades(r),grade_codes=r['grade_codes']) for r in rows}
 
     def images(self,question_id):
         """关联只在公共题库内查询；下载全成功后一次性返回，避免缺图提交。"""
@@ -213,12 +302,15 @@ class Exam:
             return []
         rows=self.search(question.subject,question.grade,
             '' if question.knowledge_point_ids else question.knowledge_points[0],limit*3,
-            question.knowledge_point_ids,question.question_id.removeprefix('exam:public:'))
+            question.knowledge_point_ids,question.question_id.removeprefix('exam:public:'),region=question.region,school_system=question.school_system,grades=question.grades)
         # 缺图题不冒充完整题；待图片服务接入后可纳入候选。
         rows=[r for r in rows if not r['image_urls'] and not r['has_attachments'] and r['answer'] and r['analysis'] and r['stem']!=question.stem]
         rows.sort(key=lambda r:(r['question']['difficulty']!=question.difficulty,len(r['question']['sub_questions'])>2,len(r['analysis'])))
+        def content(row):
+            layout=question_layout(row['question'])
+            return layout['stem']+''.join('\n'+s for s in layout['options'])+''.join('\n（'+s['id']+'）'+s['stem']+''.join('\n'+c['label']+'. '+c['text'] for c in s.get('choices',[])) for s in layout['sub_questions'])
         return [dict(id='exam:public:'+r['id'],title='题库变式 · '+r['stem'][:35],kind='question',subject=question.subject,
-            grades=r['grades'],region='全国',knowledge_points=r['labels'],content=r['stem']+''.join('\n'+s for s in r['question']['options'])+''.join('\n（'+s['id']+'）'+s['stem'] for s in r['question']['sub_questions']),answer=r['answer'],analysis=r['analysis'],
+            grades=r['grades'],region='全国',knowledge_points=r['labels'],content=content(r),answer=r['answer'],analysis=r['analysis'],
             source='exam 公共题库',version=str(r['content_revision']),is_sample=False,grade_scope=r['grade_scope']) for r in rows[:limit]]
 
     def import_graph(self,kb):
