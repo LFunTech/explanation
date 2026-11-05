@@ -15,6 +15,10 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      {{- if .Values.runtimeConfigChecksum }}
+      annotations:
+        checksum/runtime-config: {{ .Values.runtimeConfigChecksum | quote }}
+      {{- end }}
       labels:
         app.kubernetes.io/name: explanation
         app.kubernetes.io/instance: {{ .Release.Name }}

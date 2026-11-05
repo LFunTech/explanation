@@ -4,6 +4,7 @@ image:
   pullPolicy: IfNotPresent
   pullSecret: lfun
 configSecret: explanation-config
+runtimeConfigChecksum: ""
 persistence:
   existingClaim: ""
   storageClass: "" # 空值使用集群默认 StorageClass，需支持文件锁和 SQLite

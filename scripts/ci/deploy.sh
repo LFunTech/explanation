@@ -21,6 +21,7 @@ python3 scripts/ci/write_kubeconfig.py "$KUBECONFIG"
 python3 scripts/ci/prepare_config.py "$DEPLOY_TMP"
 unset APP_CONFIG KUBECONFIG_DATA
 PUBLIC_HOST=$(cat "$DEPLOY_TMP/host")
+CONFIG_CHECKSUM=$(sha256sum "$DEPLOY_TMP/runtime.env" | cut -d ' ' -f 1)
 # Render/validate the chart before any cluster mutations.
 helm lint deploy/chart -f "$VALUES" --set-string image.tag="$CI_COMMIT_TAG" --set-string ingress.host="$PUBLIC_HOST"
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml > "$DEPLOY_TMP/namespace.yaml"
@@ -39,11 +40,16 @@ unset DOCKER_PASSWORD
 kubectl -n "$NAMESPACE" create secret generic lfun --type=kubernetes.io/dockerconfigjson \
   --from-file=".dockerconfigjson=$DEPLOY_TMP/dockerconfig.json" --dry-run=client -o yaml > "$DEPLOY_TMP/pull-secret.yaml"
 kubectl -n "$NAMESPACE" apply -f "$DEPLOY_TMP/pull-secret.yaml"
-helm upgrade --install "$RELEASE_NAME" deploy/chart \
+if ! helm upgrade --install "$RELEASE_NAME" deploy/chart \
   --namespace "$NAMESPACE" -f "$VALUES" \
   --set-string image.repository="$IMAGE_REPO" \
   --set-string image.tag="$CI_COMMIT_TAG" \
   --set-string ingress.host="$PUBLIC_HOST" \
-  --wait --timeout 10m --history-max 10
+  --set-string runtimeConfigChecksum="$CONFIG_CHECKSUM" \
+  --wait --timeout 10m --history-max 10; then
+  kubectl -n "$NAMESPACE" get pods,pvc,ingress || true
+  kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -30 || true
+  exit 1
+fi
 kubectl -n "$NAMESPACE" rollout status deployment/"$RELEASE_NAME" --timeout=60s
 echo "Deployment ready: $RELEASE_NAME ($DEPLOY_ENV / $CI_COMMIT_TAG)"

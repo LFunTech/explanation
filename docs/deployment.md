@@ -93,7 +93,7 @@ git tag prod-v0.1.0
 git push origin prod-v0.1.0
 ```
 
-流水线顺序为 validate → build → 对应 deploy。应用 Secret 与镜像拉取 Secret 只写入目标命名空间；发布等待 readiness 通过，超时则流水线失败，不声称服务已就绪。
+流水线顺序为 validate → build → 对应 deploy。应用 Secret 与镜像拉取 Secret 只写入目标命名空间；配置摘要写入 Pod annotation，修改配置后重跑同一版本也会更新实例。发布等待 readiness 通过，超时则流水线失败并输出 Pod/PVC 状态及集群事件，不声称服务已就绪。
 
 ```bash
 kubectl -n explanation-test get pods,pvc,ingress
