@@ -1,6 +1,6 @@
 # 题解工坊构建与部署
 
-本项目使用与 `school-oms` 相同的 Woodpecker → Kaniko → Helm 发布流程。所有仓库设置与发布目标都属于 `tmacyang0701-pixel/explanation`（Woodpecker 仓库 65）；仓库 7 只作为参考。
+本项目使用与 `school-oms` 相同的 Woodpecker → Kaniko → Helm 发布流程。所有仓库设置与发布目标都属于 `LFunTech/explanation`（Woodpecker 仓库 65）；仓库 7 只作为参考。
 
 前端为原生 ES modules，由 FastAPI 同源提供，不需要单独 Node 构建或上传 COS。镜像包含 API、工作台、完整播放器和微应用资源。
 
